@@ -49,6 +49,9 @@ enum JevAction: String, CaseIterable {
 /// The model judges the situation; code owns the mechanics.
 struct JevState: Encodable {
     let goal: String
+    /// What the machine can do and what this observation can see. Without it
+    /// the model cannot tell an unavailable action from an unwise one.
+    let device: JevDevice
     let foregroundApp: String
     let observationSource: String
     let elements: [JevElement.Described]
@@ -58,6 +61,13 @@ struct JevState: Encodable {
     /// Ground-truth facts code has verified, distinct from what the screen
     /// appears to show.
     let verifiedFacts: [String]?
+}
+
+/// The device's own capabilities and the limits of the current observation.
+struct JevDevice: Encodable {
+    let kind: String
+    let screen: String
+    let constraints: [String]
 }
 
 // MARK: - Question Construction

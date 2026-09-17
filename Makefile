@@ -361,16 +361,19 @@ boot_dfu: build boot_binary_check
 # to run it on a SIP-enabled host. So these targets use the unsigned debug
 # binary, the same one `patcher_build` produces.
 JEV_BINARY := $(PATCHER_BINARY)
+# Exported, not expanded inline: a PROMPT containing quotes or spaces must
+# reach the shell as one already-quoted argument.
+export PROMPT
 JEV_SOCKET ?= $(VM_DIR_ABS)/vphone.sock
 JEV_FAKE_SOCKET ?= /tmp/jev-fake-phone.sock
 
 jev: patcher_build
-	@if [ -z "$(PROMPT)" ]; then echo "Usage: make jev PROMPT=\"turn on airplane mode\""; exit 1; fi
-	"$(CURDIR)/$(JEV_BINARY)" jev "$(PROMPT)" --socket "$(JEV_SOCKET)" $(JEV_ARGS)
+	@if [ -z "$$PROMPT" ]; then echo "Usage: make jev PROMPT=\"turn on airplane mode\""; exit 1; fi
+	"$(CURDIR)/$(JEV_BINARY)" jev "$$PROMPT" --socket "$(JEV_SOCKET)" $(JEV_ARGS)
 
 jev_dry: patcher_build
-	@if [ -z "$(PROMPT)" ]; then echo "Usage: make jev_dry PROMPT=\"turn on airplane mode\""; exit 1; fi
-	"$(CURDIR)/$(JEV_BINARY)" jev "$(PROMPT)" --socket "$(JEV_SOCKET)" --dry-run --verbose $(JEV_ARGS)
+	@if [ -z "$$PROMPT" ]; then echo "Usage: make jev_dry PROMPT=\"turn on airplane mode\""; exit 1; fi
+	"$(CURDIR)/$(JEV_BINARY)" jev "$$PROMPT" --socket "$(JEV_SOCKET)" --dry-run --verbose $(JEV_ARGS)
 
 # Accessibility spike recon: reports what the guest firmware exposes.
 jev_probe:
@@ -378,12 +381,12 @@ jev_probe:
 
 # Drive the agent against the fake phone — no VM required.
 jev_fake: patcher_build
-	@if [ -z "$(PROMPT)" ]; then echo "Usage: make jev_fake PROMPT=\"turn on airplane mode\""; exit 1; fi
+	@if [ -z "$$PROMPT" ]; then echo "Usage: make jev_fake PROMPT=\"turn on airplane mode\""; exit 1; fi
 	@python3 tests/jev_fake_phone.py "$(JEV_FAKE_SOCKET)" $(if $(SCREEN),$(SCREEN),home) & \
 		phone=$$!; \
 		trap "kill $$phone 2>/dev/null" EXIT INT TERM; \
 		sleep 1; \
-		"$(CURDIR)/$(JEV_BINARY)" jev "$(PROMPT)" --socket "$(JEV_FAKE_SOCKET)" --verbose $(JEV_ARGS)
+		"$(CURDIR)/$(JEV_BINARY)" jev "$$PROMPT" --socket "$(JEV_FAKE_SOCKET)" --verbose $(JEV_ARGS)
 
 # ═══════════════════════════════════════════════════════════════════
 # Firmware pipeline

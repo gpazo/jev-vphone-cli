@@ -73,13 +73,13 @@ gesture achieves it is code's business.
 All in `VPhoneJevAgent.Policy`, all evaluated in code:
 
 ```
-done.noul    >= 0.80             → stop, success
-blocked.noul >= 0.60             → stop, hand back to the human
-risky.noul   >= 0.50 && !--yes   → confirm before acting
-action.confidence <  0.50        → stop rather than guess
-action.confidence <  0.85        → confirm
-screen unchanged 3 steps         → stop, stuck
-steps > 25                       → stop, budget
+done.noul    >= 0.80                        → stop, success
+blocked.noul >= 0.60                        → stop, hand back to the human
+risky.noul   >= 0.50 && !--yes              → confirm before acting
+confidence   <  0.50                        → stop rather than guess
+confidence   <  0.85 && risky >= 0.15       → confirm
+screen unchanged 3 steps                    → stop, stuck
+steps > 25                                  → stop, budget
 ```
 
 Two guards are pure code, never asked of the model: **stuck detection** (the
@@ -87,6 +87,12 @@ model sees one screen at a time and cannot notice a loop) and the **step budget*
 
 Note `blocked` is checked before `risky`, so a screen that is both reports as
 blocked.
+
+**Why uncertainty is gated on risk.** Measured on the fake phone, benign
+navigation taps land at 0.80–0.99 confidence with risk near 0.03. A flat
+"confirm below 0.85" therefore interrupted constantly for steps whose worst case
+was wasting one step. Low confidence now prompts only when the action is also
+somewhat consequential — being wrong about something reversible is cheap.
 
 **These numbers are starting points.** TypeSafe's own guidance is that thresholds
 must be evaluated against real data and real consequences. Watch runs with
@@ -96,6 +102,20 @@ A note on reading the probabilities: Choice and Score carry `confidence`
 (a statistic over the probability distribution's shape); **Nouls do not** — the
 probability *is* the answer. A Noul near 0.5 means genuinely uncertain, not
 "medium intensity".
+
+## Feasibility, separately from safety
+
+The gates above ask whether the agent *should* act. A separate check asks
+whether the action is *possible*, which code can often answer from the
+observation — Jev choosing `type_text` when no text input exists, for instance.
+
+It only vetoes where there is evidence to veto on. An OCR observation cannot
+report focus, so typing is not refused there: declaring something impossible
+because we cannot see it would be worse than trying it.
+
+In practice this rarely fires, because the `device` block (below) tells the
+model the constraint up front and it stops proposing the impossible action. The
+veto is the backstop, not the mechanism.
 
 ## Observation
 
@@ -110,6 +130,19 @@ the same `JevObservation`:
 
 Every response reports which one ran, and swapping between them changes no agent
 code.
+
+**State carries the device's own limits**, not just the screen — that typing
+needs a focused field, that there is no hardware back button, and crucially what
+the current observation *cannot* see. Under OCR the model is told that controls
+without text do not appear at all, so it does not read absence from the list as
+absence from the screen.
+
+**Observations wait for the screen to change.** Re-asking about a screen
+identical to the one just acted on buys the same judgment twice. After acting,
+the agent re-observes until the signature changes or ~2.5s passes — which is
+also faster than a fixed sleep, since most transitions finish well inside that.
+An unchanged screen is a legitimate outcome, so it proceeds and lets stuck
+detection decide.
 
 ## Verification (partly built)
 

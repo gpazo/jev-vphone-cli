@@ -8,7 +8,7 @@ a few screens, a couple of toggles, and taps that actually change state.
 Useful for tuning question wording and thresholds, where booting a real VM
 per iteration would dominate the loop.
 
-    python3 tests/jev_fake_phone.py /tmp/fake.sock          # screen: home|settings|wifi|photos
+    python3 tests/jev_fake_phone.py /tmp/fake.sock          # screen: home|settings|wifi|safari|photos
     vphone-cli jev "turn on airplane mode" --socket /tmp/fake.sock -v
 """
 
@@ -37,6 +37,8 @@ class FakePhone:
         self.screen = "home"
         self.airplane_mode = False
         self.wifi = True
+        self.search_focused = False
+        self.search_query = None
         self.lock = threading.Lock()
 
     # -- observation ----------------------------------------------------
@@ -111,6 +113,34 @@ class FakePhone:
             "Settings (com.apple.Preferences)",
         )
 
+    def _screen_safari(self):
+        if self.search_query:
+            return (
+                [
+                    {"role": "textfield", "label": "Search or enter website",
+                     "value": self.search_query, "x": 645, "y": 200},
+                    {"role": "link", "label": f"Results for {self.search_query}",
+                     "x": 645, "y": 500},
+                    {"role": "link", "label": "Top story — climate talks open",
+                     "x": 645, "y": 640},
+                ],
+                "Safari (com.apple.mobilesafari)",
+            )
+        return (
+            [
+                {
+                    "role": "textfield",
+                    "label": "Search or enter website",
+                    "value": "focused, ready for input" if self.search_focused else "empty",
+                    "x": 645,
+                    "y": 200,
+                },
+                {"role": "button", "label": "Bookmarks", "x": 200, "y": 2600},
+                {"role": "button", "label": "Tabs", "x": 1100, "y": 2600},
+            ],
+            "Safari (com.apple.mobilesafari)",
+        )
+
     def _screen_photos(self):
         return (
             [
@@ -146,6 +176,8 @@ class FakePhone:
                     self.screen = "settings"
                 elif label == "Photos":
                     self.screen = "photos"
+                elif label == "Safari":
+                    self.screen = "safari"
             elif self.screen == "settings":
                 if label == "Airplane Mode":
                     self.airplane_mode = not self.airplane_mode
@@ -154,6 +186,9 @@ class FakePhone:
                         self.wifi = False
                 elif label == "Wi-Fi":
                     self.screen = "wifi"
+            elif self.screen == "safari":
+                if label == "Search or enter website":
+                    self.search_focused = True
             elif self.screen == "wifi":
                 if label == "Wi-Fi":
                     self.wifi = not self.wifi
@@ -166,8 +201,20 @@ class FakePhone:
             self.screen = {
                 "com.apple.Preferences": "settings",
                 "com.apple.mobileslideshow": "photos",
+                "com.apple.mobilesafari": "safari",
             }.get(bundle_id, "home")
             print(f"  [phone] launched {bundle_id} → {self.screen}", file=sys.stderr)
+
+    def type_text(self, text: str) -> None:
+        with self.lock:
+            if self.screen == "safari" and self.search_focused:
+                self.search_query = text
+                self.search_focused = False
+                print(f"  [phone] typed {text!r} → results", file=sys.stderr)
+            else:
+                # Typing with nothing focused goes nowhere, as on a real phone.
+                print(f"  [phone] typed {text!r} into nothing (no field focused)",
+                      file=sys.stderr)
 
     def press_home(self) -> None:
         with self.lock:
@@ -214,7 +261,10 @@ def handle(phone: FakePhone, conn: socket.socket) -> None:
             if command.get("name") == "home":
                 phone.press_home()
             response = {"ok": True}
-        elif kind in ("swipe", "type", "screenshot"):
+        elif kind == "type":
+            phone.type_text(command.get("text", ""))
+            response = {"ok": True}
+        elif kind in ("swipe", "screenshot"):
             print(f"  [phone] {kind} (no-op)", file=sys.stderr)
             response = {"ok": True}
         else:
