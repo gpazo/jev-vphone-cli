@@ -111,13 +111,18 @@ the same `JevObservation`:
 Every response reports which one ran, and swapping between them changes no agent
 code.
 
-## Verification uses ground truth
+## Verification (partly built)
 
-"Did airplane mode actually turn on" is answered by `settingsGet(domain:key:)`
-against the guest — not by asking Jev to judge a screenshot. Model judgment
-decides *what to do*; observed facts decide *what happened*. Facts code has
-verified are passed back in `verifiedFacts`, kept distinct from what the screen
-appears to show.
+Model judgment should decide *what to do*; observed facts should decide *what
+happened*. `JevState.verifiedFacts` is the channel for the second half — facts
+code has checked, kept separate from what the screen appears to say, and
+referenced by the `done` question only when present.
+
+**Nothing populates it yet.** Today `done` is judged from the observation alone.
+The intended source is the guest itself: "did airplane mode actually turn on" is
+a `settingsGet(domain:key:)` reading, not a screenshot interpretation. Wiring it
+needs a goal→setting mapping that does not generalise, so it is left as a seam
+on `VPhoneJevAgent` rather than guessed at.
 
 ## Cost
 

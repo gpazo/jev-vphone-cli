@@ -103,7 +103,9 @@ final class VPhoneJevAgent {
 
     /// Installed apps offered as `open_app` options. Empty disables the branch.
     var installedApps: [(bundleId: String, name: String)] = []
-    /// Ground truth code has checked, shown to the model as verified facts.
+    /// Ground truth code has checked — e.g. a `settingsGet` reading — shown
+    /// to the model separately from what the screen appears to say. Nothing
+    /// populates this yet; it is the seam for goal-specific verification.
     var verifiedFacts: [String] = []
     /// Asked before a risky or low-confidence action. Returning false stops.
     var confirm: @MainActor (String) async -> Bool = { _ in false }
@@ -152,7 +154,8 @@ final class VPhoneJevAgent {
                 questions: JevQuestions.build(
                     observation: observation,
                     apps: installedApps,
-                    textCandidates: textCandidates
+                    textCandidates: textCandidates,
+                    hasVerifiedFacts: !verifiedFacts.isEmpty
                 )
             )
             totalInputTokens += response.usage?.inputTokens ?? 0

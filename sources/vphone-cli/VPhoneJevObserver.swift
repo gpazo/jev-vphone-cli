@@ -67,7 +67,8 @@ struct JevObservation {
 /// and host-side OCR otherwise. Swapping providers changes no agent code.
 @MainActor
 protocol JevObservationProvider {
-    var source: JevObservation.Source { get }
+    /// Which source filled it is reported on the observation itself, not
+    /// here — a provider may fall back per call.
     func observe() async throws -> JevObservation
 }
 
@@ -75,15 +76,13 @@ protocol JevObservationProvider {
 
 /// Reads the guest's semantic accessibility tree over vsock.
 ///
-/// The host client (`VPhoneControl.accessibilityTree`) and the wire dispatch
-/// in `vphoned.m` already exist; the guest-side handler is the open piece.
-/// Until it lands this provider throws, and callers fall back to OCR.
+/// Whether this returns anything depends on what the guest firmware exposes;
+/// run the `probe` action first. When it yields nothing, callers fall back to
+/// OCR — see `research/jev_accessibility_spike.md`.
 @MainActor
 struct JevAccessibilityProvider: JevObservationProvider {
     let control: VPhoneControl
     let screen: CGSize
-
-    var source: JevObservation.Source { .accessibility }
 
     /// The accessibility server is off by default and returns nothing until
     /// enabled; enabling is idempotent, so it is attempted once per process
@@ -182,8 +181,6 @@ struct JevOCRProvider: JevObservationProvider {
     let screen: CGSize
     /// Discard recognitions below this confidence before Jev ever sees them.
     var minimumTextConfidence: Float = 0.3
-
-    var source: JevObservation.Source { .ocr }
 
     enum ObserverError: Error, CustomStringConvertible {
         case captureFailed

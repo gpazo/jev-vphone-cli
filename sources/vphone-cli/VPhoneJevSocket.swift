@@ -104,10 +104,6 @@ struct VPhoneJevSocketClient: Sendable {
 struct JevSocketObserver: JevObservationProvider {
     let client: VPhoneJevSocketClient
 
-    private(set) var lastSource: JevObservation.Source = .ocr
-
-    var source: JevObservation.Source { lastSource }
-
     func observe() async throws -> JevObservation {
         let response = try client.send(["t": "observe", "screen": false])
 

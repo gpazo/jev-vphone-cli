@@ -85,8 +85,14 @@ enum JevQuestions {
     static func build(
         observation: JevObservation,
         apps: [(bundleId: String, name: String)] = [],
-        textCandidates: [String] = []
+        textCandidates: [String] = [],
+        hasVerifiedFacts: Bool = false
     ) -> [String: JevQuestion] {
+        // `verifiedFacts` is omitted from state when empty, so only point the
+        // model at it when it is actually there.
+        let evidence = hasVerifiedFacts
+            ? "the current screen in `elements` and by `verifiedFacts`"
+            : "the current screen in `elements`"
         var questions: [String: JevQuestion] = [
             action: .choice(
                 """
@@ -98,9 +104,9 @@ enum JevQuestions {
             ),
             done: .noul(
                 """
-                Has `goal` already been fully accomplished, as evidenced by the current \
-                screen in `elements` and by `verifiedFacts`? Answer yes only if nothing \
-                further needs to be done — not merely if progress has been made.
+                Has `goal` already been fully accomplished, as evidenced by \(evidence)? \
+                Answer yes only if nothing further needs to be done — not merely if \
+                progress has been made.
                 """
             ),
             blocked: .noul(
