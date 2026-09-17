@@ -164,8 +164,18 @@ struct VPhoneJevCommand: ParsableCommand {
     }
 
     /// Ask on the terminal. Anything but an explicit yes stops the run.
+    ///
+    /// With no tty — piped, under `make`, in CI — there is nobody to answer,
+    /// and blocking on `readLine` would hang forever. Decline instead, and
+    /// say why.
     @MainActor
     private static func confirmOnStdin(_ prompt: String) async -> Bool {
+        guard isatty(STDIN_FILENO) == 1 else {
+            Swift.print("  confirm   \(prompt)")
+            Swift.print("            no terminal to ask — declining. Re-run with --yes to act unattended.")
+            return false
+        }
+
         Swift.print("  confirm   \(prompt) [y/N] ", terminator: "")
         guard let answer = readLine(strippingNewline: true)?.lowercased() else { return false }
         return answer == "y" || answer == "yes"

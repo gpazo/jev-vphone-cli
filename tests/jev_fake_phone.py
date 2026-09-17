@@ -8,7 +8,7 @@ a few screens, a couple of toggles, and taps that actually change state.
 Useful for tuning question wording and thresholds, where booting a real VM
 per iteration would dominate the loop.
 
-    python3 tests/jev_fake_phone.py /tmp/fake.sock
+    python3 tests/jev_fake_phone.py /tmp/fake.sock          # screen: home|settings|wifi|photos
     vphone-cli jev "turn on airplane mode" --socket /tmp/fake.sock -v
 """
 
@@ -76,6 +76,8 @@ class FakePhone:
                     "y": 410,
                 },
                 {
+                    # A navigation row, not a switch — the toggle lives one
+                    # screen deeper, as it does on a real device.
                     "role": "cell",
                     "label": "Wi-Fi",
                     "value": "Home-5G" if self.wifi else "Off",
@@ -86,6 +88,26 @@ class FakePhone:
                 {"role": "cell", "label": "General", "x": 645, "y": 900},
                 {"role": "cell", "label": "Privacy & Security", "x": 645, "y": 1020},
             ],
+            "Settings (com.apple.Preferences)",
+        )
+
+    def _screen_wifi(self):
+        return (
+            [
+                {"role": "button", "label": "Settings", "x": 120, "y": 200},
+                {
+                    "role": "switch",
+                    "label": "Wi-Fi",
+                    "value": "on" if self.wifi else "off",
+                    "x": 1100,
+                    "y": 410,
+                },
+            ]
+            + (
+                [{"role": "cell", "label": "Home-5G", "value": "connected", "x": 645, "y": 560}]
+                if self.wifi
+                else []
+            ),
             "Settings (com.apple.Preferences)",
         )
 
@@ -131,7 +153,12 @@ class FakePhone:
                     if self.airplane_mode:
                         self.wifi = False
                 elif label == "Wi-Fi":
+                    self.screen = "wifi"
+            elif self.screen == "wifi":
+                if label == "Wi-Fi":
                     self.wifi = not self.wifi
+                elif label == "Settings":
+                    self.screen = "settings"
             print(f"  [phone] tapped {label!r} → {self.state_line()}", file=sys.stderr)
 
     def launch(self, bundle_id: str) -> None:
@@ -148,7 +175,11 @@ class FakePhone:
             print("  [phone] home", file=sys.stderr)
 
     def state_line(self) -> str:
-        return f"screen={self.screen} airplane={'on' if self.airplane_mode else 'off'}"
+        return (
+            f"screen={self.screen} "
+            f"airplane={'on' if self.airplane_mode else 'off'} "
+            f"wifi={'on' if self.wifi else 'off'}"
+        )
 
 
 def handle(phone: FakePhone, conn: socket.socket) -> None:
