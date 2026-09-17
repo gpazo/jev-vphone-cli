@@ -1,0 +1,88 @@
+name: release
+
+# Build the portable, signed vphone-cli.app and attach it to a published
+# GitHub Release. Uses ./scripts/build.sh (the canonical build) so the .app
+# ships self-contained — bundled scripts/patchers/resources/requirements.txt/
+# vphoned/.tools — not the lean `make bundle` output. Signing is ad-hoc
+# (codesign --sign -) with sources/vphone.entitlements; no secrets required.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Init submodules
+        # vendor/* (--recursive: libcapstone-spm builds capstone from its own
+        # nested submodule) for the Swift build; scripts/resources is the CFW
+        # asset storage that build.sh bundles into the .app; scripts/repos/*
+        # provide the trustcache/insert_dylib tool sources.
+        run: |
+          git submodule update --init --recursive --depth 1 \
+            vendor/swift-argument-parser \
+            vendor/Dynamic \
+            vendor/libcapstone-spm \
+            vendor/libimg4-spm \
+            vendor/MachOKit \
+            scripts/resources \
+            scripts/repos/trustcache \
+            scripts/repos/insert_dylib
+
+      - name: Toolchain versions
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Install build deps
+        run: brew install ldid-procursus openssl@3
+
+      - name: Build .tools/bin/{trustcache,insert_dylib}
+        # build.sh bundles these runtime tools into the .app and errors if
+        # absent. Mirrors scripts/setup_tools.sh steps [2/4] and [3/4]; its
+        # venv ([4/4]) and sshpass ([1/4]) steps aren't needed to build.
+        run: |
+          set -euo pipefail
+          mkdir -p .tools/bin
+          openssl_prefix="$(brew --prefix openssl@3)"
+          make -C scripts/repos/trustcache \
+            OPENSSL=1 \
+            CFLAGS="-I${openssl_prefix}/include -DOPENSSL -w" \
+            LDFLAGS="-L${openssl_prefix}/lib" \
+            -j"$(sysctl -n hw.logicalcpu)"
+          cp scripts/repos/trustcache/trustcache .tools/bin/trustcache
+          clang -o .tools/bin/insert_dylib \
+            scripts/repos/insert_dylib/insert_dylib/main.c -framework Security -O2
+
+      - name: Build and bundle (portable .app)
+        run: ./scripts/build.sh
+
+      - name: Verify the bundle is portable-complete and entitled
+        run: |
+          set -euo pipefail
+          res=.build/vphone-cli.app/Contents/Resources
+          for p in scripts/fw_prepare.sh scripts/patchers/cfw.py scripts/resources \
+                   requirements.txt vphoned.signed .tools/bin/trustcache .tools/bin/insert_dylib; do
+            [ -e "$res/$p" ] || { echo "::error::bundle is missing $p — not portable"; exit 1; }
+          done
+          bin=.build/vphone-cli.app/Contents/MacOS/vphone-cli
+          codesign -d --entitlements - "$bin" 2>&1 | grep -q 'com.apple.private.virtualization' \
+            || { echo "::error::required virtualization entitlement missing from signed app"; exit 1; }
+
+      - name: Package app
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: ditto -c -k --keepParent .build/vphone-cli.app "vphone-cli-${TAG}.zip"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "vphone-cli-${TAG}.zip" --clobber
