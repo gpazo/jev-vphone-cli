@@ -1,8 +1,8 @@
 <div align="right"><strong><a href="./docs/README_ko.md">🇰🇷한국어</a></strong> | <strong><a href="./docs/README_ja.md">🇯🇵日本語</a></strong> | <strong><a href="./docs/README_zh.md">🇨🇳中文</a></strong> | <strong><a href="./docs/README_ru.md">🇷🇺Русский</a></strong> | <strong>🇬🇧English</strong></div>
 
-# vphone-cli
+# jev-vphone-cli
 
-Boot a virtual iPhone via Apple's Virtualization.framework using PCC research VM infrastructure.
+Boot a virtual iPhone via Apple's Virtualization.framework using PCC research VM infrastructure — and hand control of it to **Jev**, TypeSafe's System One model, from a natural-language goal.
 
 ![poc](./docs/demo.jpeg)
 
@@ -196,6 +196,32 @@ vphone-amfidont         # .build/vphone-cli.app/Contents/Resources/vphone-amfido
 ## Automation
 
 `vphone-cli` exposes a host control socket (`<bundle>/vphone.sock`) for programmatic control — screenshots, touch, swipes, hardware keys, clipboard — each action returning an inline screenshot for AI-driven E2E testing. See [vphone-mcp](https://github.com/pluginslab/vphone-mcp) for an MCP server wrapping it.
+
+### Jev control
+
+Give the phone a goal in plain language and let [Jev](https://typesafe.ai) drive it:
+
+```sh
+export TYPESAFE_API_KEY=...            # https://console.typesafe.ai/
+make boot                              # one terminal
+make jev PROMPT="turn on airplane mode"
+```
+
+Jev is a System One model: it returns typed judgments and calibrated probabilities rather than text. It picks the next action and which on-screen element to act on; code owns coordinates, execution, and every safety threshold. Runs stop on their own when the goal is met, when the screen needs a human (a passcode, a purchase), or when an action looks irreversible.
+
+```
+  goal      turn on airplane mode
+  observing accessibility — 5 elements, 4 apps
+
+  →  1  tap "Settings"                 conf 0.91
+  →  2  tap "Airplane Mode"            conf 0.99
+  ·  3  goal already satisfied         conf 0.98
+
+  done      goal reached in 3 steps
+  cost      3803 input tokens
+```
+
+`make jev_dry PROMPT="..."` shows the next decision without touching the phone, and `make jev_fake PROMPT="..."` runs the whole loop against a fake phone with no VM at all. See [docs/jev.md](./docs/jev.md).
 
 ## Acknowledgements
 

@@ -1,12 +1,14 @@
-# vphone-cli
+# jev-vphone-cli
 
-Virtual iPhone boot tool using Apple's Virtualization.framework with PCC research VMs.
+Virtual iPhone boot tool using Apple's Virtualization.framework with PCC research VMs, with a Jev-driven agent loop for natural-language phone control.
 
 ## Quick Reference
 
 - **Build:** `make build`
 - **Boot (GUI):** `make boot`
 - **Boot (DFU):** `make boot_dfu`
+- **Jev control:** `make jev PROMPT="turn on airplane mode"` (needs `TYPESAFE_API_KEY`)
+- **Jev, no VM:** `make jev_fake PROMPT="..."` — runs against `tests/jev_fake_phone.py`
 - **All targets:** `make help`
 - **Python venv:** `make setup_venv` (installs to `.venv/`, activate with `source .venv/bin/activate`)
 - **Platform:** macOS 15+ (Sequoia), SIP/AMFI disabled
@@ -62,6 +64,14 @@ sources/
     │
     │   # Guest daemon client (vsock)
     ├── VPhoneControl.swift           # Host-side vsock client for vphoned (length-prefixed JSON)
+    │
+    │   # Jev agent — natural-language phone control
+    ├── VPhoneJevClient.swift         # TypeSafe System One HTTP client + question/answer types
+    ├── VPhoneJevObserver.swift       # JevObservation + accessibility / Vision-OCR providers
+    ├── VPhoneJevQuestions.swift      # Question construction, action vocabulary, text spans
+    ├── VPhoneJevAgent.swift          # observe→decide→act loop; all thresholds live here
+    ├── VPhoneJevSocket.swift         # Out-of-process observer/actuator over vphone.sock
+    ├── VPhoneJevCLI.swift            # `vphone-cli jev "<goal>"`
     │
     │   # Window & UI
     ├── VPhoneWindowController.swift  # @MainActor VM window management + toolbar
@@ -127,6 +137,14 @@ research/                         # Detailed firmware/patch documentation
 - **File browser:** SwiftUI (`VPhoneFileBrowserView` + `VPhoneFileBrowserModel`) in `NSHostingController`. Search, sort, upload/download, drag-drop via `VPhoneControl`.
 - **IPA installation:** `VPhoneIPAInstaller` extracts + re-signs via `VPhoneSigner` + installs over vsock.
 - **Screen recording:** `VPhoneScreenRecorder` captures VM display. Controls via Record menu.
+- **Jev agent:** Natural-language goal → `JevObservation` (text) → one batched TypeSafe
+  request → code-side gating → one bounded action. Jev returns typed judgments only: it
+  never generates text, never produces coordinates, and never decides whether to act —
+  every threshold lives in `VPhoneJevAgent.Policy`. See `docs/jev.md`.
+- **Screen→text:** Jev accepts text only, so the screen is textified before it is judged.
+  Preferred source is the guest accessibility tree; Vision OCR is the fallback. Both fill
+  the same struct, so swapping them changes no agent code —
+  see `research/jev_accessibility_spike.md`.
 
 ---
 

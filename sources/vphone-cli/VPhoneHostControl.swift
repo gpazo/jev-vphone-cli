@@ -38,6 +38,8 @@ class VPhoneHostControl {
         var error: String?
         var ok = false
         var imageBase64: String?
+        /// Extra top-level fields merged into the JSON response.
+        var extra: [String: Any]?
     }
 
     /// Screen pixel dimensions for coordinate mapping.
@@ -406,9 +408,158 @@ class VPhoneHostControl {
             semaphore.wait()
             writeResponse(fd, ok: result.ok, error: result.error, image: result.imageBase64)
 
+        case "observe":
+            let semaphore = DispatchSemaphore(value: 0)
+            let result = ResultBox()
+
+            Task { @MainActor in
+                defer { semaphore.signal() }
+                guard let controller else {
+                    result.error = "no active VM"
+                    return
+                }
+                do {
+                    let observation = try await controller.observe()
+                    result.extra = [
+                        "foreground": observation.foregroundApp,
+                        "source": observation.source.rawValue,
+                        "screen": [
+                            "width": Int(observation.screen.width),
+                            "height": Int(observation.screen.height),
+                        ],
+                        "elements": observation.elements.map { element -> [String: Any] in
+                            var dict: [String: Any] = [
+                                "id": element.id,
+                                "label": element.label,
+                                "x": Int(element.point.x),
+                                "y": Int(element.point.y),
+                            ]
+                            if let role = element.role { dict["role"] = role }
+                            if let value = element.value { dict["value"] = value }
+                            return dict
+                        },
+                    ]
+                    result.ok = true
+                } catch {
+                    result.error = "\(error)"
+                }
+            }
+
+            semaphore.wait()
+            writeResponse(fd, ok: result.ok, error: result.error, extra: result.extra)
+
+        case "launch":
+            guard let bundleId = json["bundle"] as? String else {
+                writeResponse(fd, ok: false, error: "launch requires bundle")
+                return
+            }
+            let semaphore = DispatchSemaphore(value: 0)
+            let result = ResultBox()
+
+            Task { @MainActor in
+                defer { semaphore.signal() }
+                guard let controller, let ctl = controller.control, ctl.isConnected else {
+                    result.error = "guest not connected"
+                    return
+                }
+                do {
+                    _ = try await ctl.appLaunch(bundleId: bundleId)
+                    result.ok = true
+                    if wantScreen {
+                        try? await Task.sleep(nanoseconds: UInt64(screenDelay) * 1_000_000)
+                        result.imageBase64 = await controller.captureCompactScreenshot()
+                    }
+                } catch {
+                    result.error = "\(error)"
+                }
+            }
+
+            semaphore.wait()
+            writeResponse(fd, ok: result.ok, error: result.error, image: result.imageBase64)
+
+        case "ax_probe":
+            // Recon for the accessibility spike: reports which libraries,
+            // symbols and classes the guest firmware actually exposes.
+            let semaphore = DispatchSemaphore(value: 0)
+            let result = ResultBox()
+
+            Task { @MainActor in
+                defer { semaphore.signal() }
+                guard let controller, let ctl = controller.control, ctl.isConnected else {
+                    result.error = "guest not connected"
+                    return
+                }
+                do {
+                    result.extra = ["probe": try await ctl.accessibilityProbe()]
+                    result.ok = true
+                } catch {
+                    result.error = "\(error)"
+                }
+            }
+
+            semaphore.wait()
+            writeResponse(fd, ok: result.ok, error: result.error, extra: result.extra)
+
+        case "apps":
+            let semaphore = DispatchSemaphore(value: 0)
+            let result = ResultBox()
+
+            Task { @MainActor in
+                defer { semaphore.signal() }
+                guard let controller, let ctl = controller.control, ctl.isConnected else {
+                    result.error = "guest not connected"
+                    return
+                }
+                do {
+                    let apps = try await ctl.appList(filter: (json["filter"] as? String) ?? "all")
+                    result.extra = [
+                        "apps": apps.map { ["bundle_id": $0.bundleId, "name": $0.name] },
+                    ]
+                    result.ok = true
+                } catch {
+                    result.error = "\(error)"
+                }
+            }
+
+            semaphore.wait()
+            writeResponse(fd, ok: result.ok, error: result.error, extra: result.extra)
+
         default:
             writeResponse(fd, ok: false, error: "unknown command: \(type)")
         }
+    }
+
+    // MARK: - Observation
+
+    /// Produce a text description of the current screen for Jev.
+    ///
+    /// Prefers the guest's semantic accessibility tree — roles, values and
+    /// offscreen elements — and falls back to host-side OCR when the guest
+    /// cannot supply one. Callers do not need to know which ran; the
+    /// response carries `source` so it can be reported.
+    func observe() async throws -> JevObservation {
+        let size = CGSize(width: screenWidth, height: screenHeight)
+
+        if let control, control.isConnected {
+            let provider = JevAccessibilityProvider(control: control, screen: size)
+            if let observation = try? await provider.observe(), !observation.elements.isEmpty {
+                return observation
+            }
+        }
+
+        let provider = JevOCRProvider(
+            capture: { [weak self] in
+                guard let self,
+                      let recorder = screenRecorder,
+                      let view = captureView,
+                      view.window != nil
+                else { return nil }
+                return await captureStillImage(recorder: recorder, view: view)
+            },
+            control: control,
+            screen: size
+        )
+        return try await provider.observe()
     }
 
     // MARK: - Socket I/O
@@ -431,12 +582,14 @@ class VPhoneHostControl {
     }
 
     private nonisolated static func writeResponse(
-        _ fd: Int32, ok: Bool, path: String? = nil, error: String? = nil, image: String? = nil
+        _ fd: Int32, ok: Bool, path: String? = nil, error: String? = nil, image: String? = nil,
+        extra: [String: Any]? = nil
     ) {
         var dict: [String: Any] = ["ok": ok]
         if let path { dict["path"] = path }
         if let error { dict["error"] = error }
         if let image { dict["image"] = image }
+        for (key, value) in extra ?? [:] { dict[key] = value }
 
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
               var json = String(data: data, encoding: .utf8)

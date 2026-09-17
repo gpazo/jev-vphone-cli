@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════
-# vphone-cli — Virtual iPhone boot tool
+# jev-vphone-cli — Virtual iPhone boot tool with Jev-driven control
 # ═══════════════════════════════════════════════════════════════════
 
 # ─── Configuration (override with make VAR=value) ─────────────────
@@ -46,7 +46,7 @@ export PATH := $(CURDIR)/$(TOOLS_PREFIX)/bin:$(CURDIR)/$(VENV)/bin:$(CURDIR)/.bu
 # ─── Default ──────────────────────────────────────────────────────
 .PHONY: help
 help:
-	@echo "vphone-cli — Virtual iPhone boot tool"
+	@echo "jev-vphone-cli — Virtual iPhone boot tool with Jev-driven control"
 	@echo ""
 	@echo "LazyCat (AIO):"
 	@echo "  make setup_machine                   Full setup through First Boot"
@@ -67,6 +67,16 @@ help:
 	@echo ""
 	@echo "Setup (one-time):"
 	@echo "  make setup_tools             Install all tools (brew, trustcache, insert_dylib, venv+pymobiledevice3)"
+	@echo ""
+	@echo "Jev (natural-language control of a running VM):"
+	@echo "  make jev PROMPT=\"...\"        Drive the booted phone toward a goal"
+	@echo "    Options: JEV_ARGS=--yes    Skip confirmation on risky/uncertain steps"
+	@echo "             JEV_SOCKET=path   Automation socket (default: \$$(VM_DIR)/vphone.sock)"
+	@echo "  make jev_dry PROMPT=\"...\"    Show the next decision without touching the phone"
+	@echo "  make jev_probe               Accessibility spike recon against the guest"
+	@echo "  make jev_fake PROMPT=\"...\"   Run the agent against the fake phone (no VM needed)"
+	@echo "    Options: SCREEN=photos     Fake phone's starting screen (home|settings|photos)"
+	@echo "  Requires TYPESAFE_API_KEY in the environment."
 	@echo ""
 	@echo "Build:"
 	@echo "  make build                   Build + sign vphone-cli"
@@ -339,6 +349,41 @@ boot_dfu: build boot_binary_check
 	cd "$(VM_DIR)" && "$(CURDIR)/$(BINARY)" \
 		--config ./config.plist \
 		--dfu
+
+# ═══════════════════════════════════════════════════════════════════
+# Jev — natural-language control of a running VM
+# ═══════════════════════════════════════════════════════════════════
+
+.PHONY: jev jev_dry jev_probe jev_fake
+
+# The jev subcommand is a plain automation-socket client: it needs no
+# private entitlements, and signing the binary with them makes AMFI refuse
+# to run it on a SIP-enabled host. So these targets use the unsigned debug
+# binary, the same one `patcher_build` produces.
+JEV_BINARY := $(PATCHER_BINARY)
+JEV_SOCKET ?= $(VM_DIR_ABS)/vphone.sock
+JEV_FAKE_SOCKET ?= /tmp/jev-fake-phone.sock
+
+jev: patcher_build
+	@if [ -z "$(PROMPT)" ]; then echo "Usage: make jev PROMPT=\"turn on airplane mode\""; exit 1; fi
+	"$(CURDIR)/$(JEV_BINARY)" jev "$(PROMPT)" --socket "$(JEV_SOCKET)" $(JEV_ARGS)
+
+jev_dry: patcher_build
+	@if [ -z "$(PROMPT)" ]; then echo "Usage: make jev_dry PROMPT=\"turn on airplane mode\""; exit 1; fi
+	"$(CURDIR)/$(JEV_BINARY)" jev "$(PROMPT)" --socket "$(JEV_SOCKET)" --dry-run --verbose $(JEV_ARGS)
+
+# Accessibility spike recon: reports what the guest firmware exposes.
+jev_probe:
+	@printf '{"t":"ax_probe"}\n' | nc -U "$(JEV_SOCKET)" | python3 -m json.tool
+
+# Drive the agent against the fake phone — no VM required.
+jev_fake: patcher_build
+	@if [ -z "$(PROMPT)" ]; then echo "Usage: make jev_fake PROMPT=\"turn on airplane mode\""; exit 1; fi
+	@python3 tests/jev_fake_phone.py "$(JEV_FAKE_SOCKET)" $(if $(SCREEN),$(SCREEN),home) & \
+		phone=$$!; \
+		trap "kill $$phone 2>/dev/null" EXIT INT TERM; \
+		sleep 1; \
+		"$(CURDIR)/$(JEV_BINARY)" jev "$(PROMPT)" --socket "$(JEV_FAKE_SOCKET)" --verbose $(JEV_ARGS)
 
 # ═══════════════════════════════════════════════════════════════════
 # Firmware pipeline

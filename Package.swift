@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "vphone-cli",
+    name: "jev-vphone-cli",
     platforms: [
         .macOS(.v15),
     ],

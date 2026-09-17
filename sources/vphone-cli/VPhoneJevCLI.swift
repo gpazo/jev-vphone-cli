@@ -1,0 +1,173 @@
+import ArgumentParser
+import CoreGraphics
+import Foundation
+
+// MARK: - jev
+
+struct VPhoneJevCommand: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "jev",
+        abstract: "Drive a running virtual iPhone toward a goal stated in plain language",
+        discussion: """
+        Observes the phone's screen as text, asks Jev (TypeSafe's System One
+        model) for one bounded action at a time, executes it, and repeats.
+
+        The VM must already be booted — this talks to it over the automation
+        socket that `make boot` creates next to the VM config.
+
+        Requires a TypeSafe API key in TYPESAFE_API_KEY, or --api-key.
+
+        Examples:
+          vphone-cli jev "turn on airplane mode"
+          vphone-cli jev "open Safari and search for climate news" --dry-run
+          vphone-cli jev "set the wallpaper to the second one" --yes
+        """
+    )
+
+    @Argument(help: "What the phone should accomplish, in plain language.")
+    var goal: String
+
+    @Option(help: "Automation socket of the running VM.")
+    var socket: String = "vm/vphone.sock"
+
+    @Flag(help: "Decide and report every step without touching the phone.")
+    var dryRun = false
+
+    @Flag(name: .shortAndLong, help: "Act without asking, including on risky steps.")
+    var yes = false
+
+    @Option(help: "Give up after this many steps.")
+    var maxSteps: Int = 25
+
+    @Option(help: "TypeSafe API key. Defaults to $TYPESAFE_API_KEY.")
+    var apiKey: String?
+
+    @Option(help: "TypeSafe model identifier.")
+    var model: String = VPhoneJevClient.defaultModel
+
+    @Flag(name: .shortAndLong, help: "Print the full state sent to Jev each step.")
+    var verbose = false
+
+    // MARK: Run
+
+    func run() throws {
+        // The agent is main-actor isolated, so the main thread must stay free
+        // to service it. Drive the run loop and stop it when the task ends
+        // rather than blocking on a semaphore, which would deadlock.
+        let box = ErrorBox()
+        let options = self
+
+        Task { @MainActor in
+            defer { CFRunLoopStop(CFRunLoopGetMain()) }
+            do {
+                try await options.execute()
+            } catch {
+                box.error = error
+            }
+        }
+
+        CFRunLoopRun()
+
+        // Rethrown as-is: a ValidationError would make ArgumentParser append
+        // usage text to what is a runtime failure, not a usage mistake.
+        if let error = box.error {
+            throw error
+        }
+    }
+
+    private final class ErrorBox: @unchecked Sendable {
+        var error: Error?
+    }
+
+    @MainActor
+    private func execute() async throws {
+        let client = try VPhoneJevClient(apiKey: apiKey, model: model)
+        let socketClient = VPhoneJevSocketClient(socketPath: socket)
+
+        let observer = JevSocketObserver(client: socketClient)
+        // One probe up front: fails fast with a useful message if the VM is
+        // not running, rather than after the first API call is billed.
+        let probe = try await observer.observe()
+
+        let actuator: any JevActuator = dryRun
+            ? JevDryRunActuator()
+            : JevSocketActuator(client: socketClient, screen: probe.screen)
+
+        var policy = VPhoneJevAgent.Policy.default
+        policy.maxSteps = maxSteps
+
+        let agent = VPhoneJevAgent(
+            goal: goal,
+            client: client,
+            provider: observer,
+            actuator: actuator,
+            policy: policy,
+            mode: dryRun ? .dryRun : (yes ? .unattended : .live)
+        )
+        agent.installedApps = observer.installedApps()
+        agent.confirm = Self.confirmOnStdin
+        agent.onStep = { step in Self.print(step, verbose: verbose) }
+
+        header(probe, appCount: agent.installedApps.count)
+
+        let outcome = try await agent.run()
+        footer(outcome, tokens: agent.totalInputTokens)
+
+        if case .stopped = outcome {
+            throw ExitCode(1)
+        }
+    }
+
+    // MARK: Output
+
+    private func header(_ observation: JevObservation, appCount: Int) {
+        Swift.print("")
+        Swift.print("  goal      \(goal)")
+        Swift.print("  app       \(observation.foregroundApp)")
+        Swift.print("  observing \(observation.source.rawValue) — \(observation.elements.count) elements, \(appCount) apps")
+        Swift.print("  mode      \(dryRun ? "dry run (nothing will be touched)" : (yes ? "unattended" : "confirm when risky or uncertain"))")
+        Swift.print("")
+    }
+
+    private static func print(_ step: VPhoneJevAgent.Step, verbose: Bool) {
+        // `detail` already reads as a verb phrase ("tap \"Settings\"",
+        // "scroll down"), so the action name is not repeated alongside it.
+        let marker = step.executed ? "→" : "·"
+        Swift.print(
+            String(
+                format: "  %@ %2d  %-44@ conf %.2f",
+                marker, step.index, step.detail as NSString, step.actionConfidence
+            )
+        )
+        if verbose {
+            Swift.print(
+                String(
+                    format: "          done %.2f   blocked %.2f   risky %.2f   %d tokens",
+                    step.done, step.blocked, step.risky, step.inputTokens
+                )
+            )
+        }
+    }
+
+    private func footer(_ outcome: VPhoneJevAgent.Outcome, tokens: Int) {
+        Swift.print("")
+        switch outcome {
+        case let .achieved(steps):
+            Swift.print("  done      goal reached in \(steps) step\(steps == 1 ? "" : "s")")
+        case let .stopped(reason, steps):
+            Swift.print("  stopped   \(reason) (after \(steps) step\(steps == 1 ? "" : "s"))")
+        case let .exhausted(steps):
+            Swift.print("  gave up   step budget of \(steps) exhausted")
+        }
+        Swift.print("  cost      \(tokens) input tokens")
+        Swift.print("")
+    }
+
+    /// Ask on the terminal. Anything but an explicit yes stops the run.
+    @MainActor
+    private static func confirmOnStdin(_ prompt: String) async -> Bool {
+        Swift.print("  confirm   \(prompt) [y/N] ", terminator: "")
+        guard let answer = readLine(strippingNewline: true)?.lowercased() else { return false }
+        return answer == "y" || answer == "yes"
+    }
+}

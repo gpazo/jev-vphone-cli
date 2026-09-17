@@ -694,12 +694,37 @@ class VPhoneControl {
 
     // MARK: - Accessibility
 
-    func accessibilityTree(depth: Int = -1) async throws -> [String: Any] {
+    /// Semantic element tree for one process. The guest needs a pid — use
+    /// `appForeground()` to find the app worth describing.
+    func accessibilityTree(pid: Int? = nil, depth: Int = -1) async throws -> [String: Any] {
         guard guestCaps.contains("accessibility_tree") else {
             throw ControlError.unsupportedCapability("accessibility_tree")
         }
-        let (resp, _) = try await sendRequest(["t": "accessibility_tree", "depth": depth])
+        var request: [String: Any] = ["t": "accessibility_tree", "depth": depth]
+        if let pid { request["pid"] = pid }
+        let (resp, _) = try await sendRequest(request)
         return resp
+    }
+
+    /// Recon: which accessibility libraries, symbols and classes this
+    /// firmware actually exposes. Run this before trusting the tree.
+    func accessibilityProbe() async throws -> [String: Any] {
+        guard guestCaps.contains("accessibility_tree") else {
+            throw ControlError.unsupportedCapability("accessibility_tree")
+        }
+        let (resp, _) = try await sendRequest(["t": "accessibility_tree", "action": "probe"])
+        return resp
+    }
+
+    /// Turn the guest's accessibility server on. Elements stay empty until
+    /// it is running, and it is off by default.
+    @discardableResult
+    func accessibilityEnable() async throws -> Bool {
+        guard guestCaps.contains("accessibility_tree") else {
+            throw ControlError.unsupportedCapability("accessibility_tree")
+        }
+        let (resp, _) = try await sendRequest(["t": "accessibility_tree", "action": "enable"])
+        return resp["enabled"] as? Bool ?? false
     }
 
     // MARK: - Location
