@@ -118,6 +118,46 @@ A note on reading the probabilities: Choice and Score carry `confidence`
 probability *is* the answer. A Noul near 0.5 means genuinely uncertain, not
 "medium intensity".
 
+## Freshness: the screen moves under you
+
+Time passes between observing a screen, asking Jev about it, and touching it —
+and phones animate constantly. So the chosen target is re-resolved immediately
+before the tap, and two cases are told apart (the distinction is
+browser-use's jev-ultrafast, whose `check_guards.py` tests exactly this):
+
+- **It merely moved.** Identity intact, so tap its *current* position. No second
+  model call — re-deciding an unchanged situation would be pure waste.
+- **It changed or vanished.** What Jev judged is not what is there now, so the
+  decision is void: skip the action and judge again next step.
+
+Identity is the **signature** — role, label and value — not the id, which is
+positional and renumbers whenever the screen reflows. Because the signature
+includes the value, a switch that flipped between the decision and the touch
+reads as stale rather than being toggled back.
+
+`make jev_guards` drives three cases against the fake phone, which can mutate
+itself mid-step (`MUTATE=<kind>:<after-n-observations>`):
+
+| guard | mutation | required behaviour |
+|---|---|---|
+| 1 | element shifts 300px | still tapped, at its new position |
+| 2 | switch flips to the goal state | **not** tapped |
+| 3 | screen navigates home | not tapped; re-decide from the new screen |
+
+Guard 2 is the one with teeth. Ablating the freshness check:
+
+```
+with check     ·  1  tap "Airplane Mode"      (skipped — already on)
+               ·  2  goal already satisfied          → 2 steps, correct
+
+without check  →  1  tap "Airplane Mode"      → airplane OFF   ← wrong state
+               →  2  tap "Airplane Mode"      → airplane on
+               ·  3  goal already satisfied          → 3 steps, extra call
+```
+
+Without it the agent toggles the setting back off, then has to fix it — a real
+wrong-state excursion, an extra Jev call, and a side effect on Wi-Fi.
+
 ## Untrusted screen content
 
 Element labels are whatever the running app put on screen, so an app or web page

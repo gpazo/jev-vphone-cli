@@ -40,14 +40,30 @@ class FakePhone:
         self.search_focused = False
         self.search_query = None
         self.followed_injection = False
+        # Guard testing: apply a mutation once, after N observations, to
+        # simulate the screen moving on between a decision and the touch.
+        self.mutate_after = None
+        self.mutate_kind = None
+        self.observations = 0
+        self.mutated = False
+        self.shift_x = 0
         self.lock = threading.Lock()
 
     # -- observation ----------------------------------------------------
 
     def observe(self) -> dict:
         with self.lock:
+            self.observations += 1
+            if (
+                self.mutate_after is not None
+                and not self.mutated
+                and self.observations > self.mutate_after
+            ):
+                self._apply_mutation()
             builder = getattr(self, f"_screen_{self.screen}")
             elements, foreground = builder()
+            if self.shift_x:
+                elements = [{**e, "x": e["x"] + self.shift_x} for e in elements]
         return {
             "foreground": foreground,
             "source": "accessibility",
@@ -190,6 +206,22 @@ class FakePhone:
             "Photos (com.apple.mobileslideshow)",
         )
 
+    def _apply_mutation(self):
+        """One-shot screen change, to exercise the agent's freshness check."""
+        self.mutated = True
+        if self.mutate_kind == "move":
+            # Identity intact, position different: the agent should still act,
+            # at the new coordinates, without asking the model again.
+            self.shift_x = 300
+        elif self.mutate_kind == "value":
+            # The switch flipped under the agent. Its identity changed, so the
+            # judgment is void — tapping now would toggle it back.
+            self.airplane_mode = not self.airplane_mode
+        elif self.mutate_kind == "navigate":
+            # The whole screen went away.
+            self.screen = "home"
+        print(f"  [phone] MUTATED ({self.mutate_kind}) → {self.state_line()}", file=sys.stderr)
+
     # -- actuation ------------------------------------------------------
 
     def tap(self, x: float, y: float) -> None:
@@ -320,6 +352,13 @@ def main() -> int:
 
     phone = FakePhone()
     phone.screen = start
+    # MUTATE=<kind>:<after-n-observations>, e.g. MUTATE=value:1
+    if os.environ.get("MUTATE"):
+        kind, _, after = os.environ["MUTATE"].partition(":")
+        phone.mutate_kind = kind
+        phone.mutate_after = int(after or 1)
+        print(f"will mutate ({kind}) after {phone.mutate_after} observation(s)",
+              file=sys.stderr)
 
     if os.path.exists(path):
         os.unlink(path)

@@ -314,7 +314,27 @@ final class VPhoneJevAgent {
 
             // ── Act ──
 
-            try await execute(plan)
+            var executable = plan
+            if case let .tap(element) = plan {
+                switch await revalidate(element) {
+                case let .fresh(current):
+                    executable = .tap(current)
+                case let .stale(reason):
+                    // The screen moved on between the judgment and the touch.
+                    // Acting now would act on something Jev never saw.
+                    report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, response)
+                    history.append(
+                        JevHistoryEntry(
+                            action: "skipped \(plan.detail) — \(reason)",
+                            changedScreen: true
+                        )
+                    )
+                    lastSignature = nil
+                    continue
+                }
+            }
+
+            try await execute(executable)
             report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, true, response)
             history.append(JevHistoryEntry(action: plan.detail, changedScreen: nil))
 
@@ -323,6 +343,53 @@ final class VPhoneJevAgent {
 
 
         return .exhausted(steps: policy.maxSteps)
+    }
+
+    // MARK: Freshness
+
+    /// What a re-check of the chosen target found.
+    private enum Freshness {
+        /// Still the element that was judged; carries current coordinates,
+        /// which may differ from those observed a moment ago.
+        case fresh(JevElement)
+        /// Gone, or no longer the thing that was judged.
+        case stale(String)
+    }
+
+    /// Re-resolve the target immediately before acting on it.
+    ///
+    /// Time passes between observing a screen, asking Jev about it, and
+    /// touching it — and phones animate constantly. Two cases must be told
+    /// apart, following browser-use's jev-ultrafast:
+    ///
+    /// - The element merely **moved**. Its identity is intact, so use its
+    ///   current position and act. Re-deciding would waste a call on an
+    ///   unchanged situation.
+    /// - The element **changed or vanished**. What Jev judged is not what is
+    ///   there now, so the decision is void and the situation must be judged
+    ///   again.
+    ///
+    /// Identity is the signature — role, label and value — not the id, which
+    /// is positional and renumbers whenever the screen reflows. Because the
+    /// signature includes the value, a switch that flipped between the
+    /// decision and the touch correctly reads as stale rather than being
+    /// toggled back.
+    private func revalidate(_ element: JevElement) async -> Freshness {
+        guard let observation = try? await provider.observe() else {
+            // Cannot check. Acting on a slightly old position beats refusing
+            // to act because an observation failed.
+            return .fresh(element)
+        }
+
+        if let current = observation.element(id: element.id),
+           current.signature == element.signature
+        {
+            return .fresh(current)
+        }
+        if let current = observation.elements.first(where: { $0.signature == element.signature }) {
+            return .fresh(current)
+        }
+        return .stale("\"\(element.label)\" is no longer on screen as it was judged")
     }
 
     // MARK: Observation

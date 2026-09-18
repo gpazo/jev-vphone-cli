@@ -75,6 +75,7 @@ help:
 	@echo "  make jev_dry PROMPT=\"...\"    Show the next decision without touching the phone"
 	@echo "  make jev_probe               Accessibility spike recon against the guest"
 	@echo "  make jev_fake PROMPT=\"...\"   Run the agent against the fake phone (no VM needed)"
+	@echo "  make jev_guards              Freshness guards: screen changes mid-decision"
 	@echo "    Options: SCREEN=photos     Fake phone's starting screen (home|settings|photos)"
 	@echo "  Requires TYPESAFE_API_KEY in the environment."
 	@echo ""
@@ -354,7 +355,7 @@ boot_dfu: build boot_binary_check
 # Jev — natural-language control of a running VM
 # ═══════════════════════════════════════════════════════════════════
 
-.PHONY: jev jev_dry jev_probe jev_fake
+.PHONY: jev jev_dry jev_probe jev_fake jev_guards
 
 # The jev subcommand is a plain automation-socket client: it needs no
 # private entitlements, and signing the binary with them makes AMFI refuse
@@ -364,6 +365,7 @@ JEV_BINARY := $(PATCHER_BINARY)
 # Exported, not expanded inline: a PROMPT containing quotes or spaces must
 # reach the shell as one already-quoted argument.
 export PROMPT
+export MUTATE
 JEV_SOCKET ?= $(VM_DIR_ABS)/vphone.sock
 JEV_FAKE_SOCKET ?= /tmp/jev-fake-phone.sock
 
@@ -378,6 +380,21 @@ jev_dry: patcher_build
 # Accessibility spike recon: reports what the guest firmware exposes.
 jev_probe:
 	@printf '{"t":"ax_probe"}\n' | nc -U "$(JEV_SOCKET)" | python3 -m json.tool
+
+# Freshness guards: the screen changes between the decision and the touch.
+# Each case asserts on the fake phone's own log, so a regression is visible
+# without reading model output.
+jev_guards: patcher_build
+	@set -e; \
+	echo "guard 1/3  element moves — should still tap it, at its new position"; \
+	MUTATE=move:2 $(MAKE) --no-print-directory jev_fake PROMPT="turn on airplane mode" \
+		SCREEN=settings JEV_ARGS=--yes 2>&1 | grep -E "MUTATED|tapped|^  (→|·)" || true; \
+	echo; echo "guard 2/3  switch flips — must NOT tap, or it toggles back off"; \
+	MUTATE=value:2 $(MAKE) --no-print-directory jev_fake PROMPT="turn on airplane mode" \
+		SCREEN=settings JEV_ARGS=--yes 2>&1 | grep -E "MUTATED|tapped|^  (→|·)" || true; \
+	echo; echo "guard 3/3  screen navigates away — must re-decide, not tap blind"; \
+	MUTATE=navigate:2 $(MAKE) --no-print-directory jev_fake PROMPT="turn on airplane mode" \
+		SCREEN=settings JEV_ARGS=--yes 2>&1 | grep -E "MUTATED|tapped|^  (→|·)" || true
 
 # Drive the agent against the fake phone — no VM required.
 jev_fake: patcher_build
