@@ -45,24 +45,30 @@ struct LibraryTests {
     }
 
     @Test func defaultRootHonorsEnvOverride() {
-        setenv("VPHONE_LIBRARY_ROOT", "/tmp/vphone-test-root", 1)
-        defer { unsetenv("VPHONE_LIBRARY_ROOT") }
-        #expect(VPhoneLibrary.defaultRoot().path == "/tmp/vphone-test-root")
+        ProcessEnvironment.exclusive {
+            setenv("VPHONE_LIBRARY_ROOT", "/tmp/vphone-test-root", 1)
+            defer { unsetenv("VPHONE_LIBRARY_ROOT") }
+            #expect(VPhoneLibrary.defaultRoot().path == "/tmp/vphone-test-root")
+        }
     }
 
     @Test func defaultRootHonorsVPHONERoot() {
-        unsetenv("VPHONE_LIBRARY_ROOT")
-        setenv("VPHONE_ROOT", "/tmp/vphone-test-root", 1)
-        defer { unsetenv("VPHONE_ROOT") }
-        #expect(VPhoneLibrary.defaultRoot().path == "/tmp/vphone-test-root/VMs")
+        ProcessEnvironment.exclusive {
+            unsetenv("VPHONE_LIBRARY_ROOT")
+            setenv("VPHONE_ROOT", "/tmp/vphone-test-root", 1)
+            defer { unsetenv("VPHONE_ROOT") }
+            #expect(VPhoneLibrary.defaultRoot().path == "/tmp/vphone-test-root/VMs")
+        }
     }
 
     @Test func defaultRootIsShellSafe() {
         // The default root feeds the shell/make firmware pipeline; a space in it
         // (e.g. "Application Support") breaks unquoted expansion. Must stay space-free.
-        unsetenv("VPHONE_LIBRARY_ROOT")
-        unsetenv("VPHONE_ROOT")
-        #expect(!VPhoneLibrary.defaultRoot().path.contains(" "))
+        ProcessEnvironment.exclusive {
+            unsetenv("VPHONE_LIBRARY_ROOT")
+            unsetenv("VPHONE_ROOT")
+            #expect(!VPhoneLibrary.defaultRoot().path.contains(" "))
+        }
     }
 
     @Test func scanReportsCorruptBundlesInsteadOfDropping() throws {
