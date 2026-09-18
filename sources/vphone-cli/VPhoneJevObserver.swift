@@ -47,8 +47,13 @@ struct JevObservation {
 
     let foregroundApp: String
     let elements: [JevElement]
-    let screen: CGSize
+    /// The screen's rectangle in the same coordinate space as element points.
+    /// Zero-origin for the VM, where points are device pixels; the window's
+    /// rect for the Simulator, where they are host-global.
+    let bounds: CGRect
     let source: Source
+
+    var screen: CGSize { bounds.size }
 
     func element(id: String) -> JevElement? {
         elements.first { $0.id == id }
@@ -108,7 +113,7 @@ struct JevAccessibilityProvider: JevObservationProvider {
         return JevObservation(
             foregroundApp: Self.describe(foreground),
             elements: elements,
-            screen: screen,
+            bounds: CGRect(origin: .zero, size: screen),
             source: .accessibility
         )
     }
@@ -204,7 +209,7 @@ struct JevOCRProvider: JevObservationProvider {
         return JevObservation(
             foregroundApp: foreground.map { "\($0.name) (\($0.bundleId))" } ?? "unknown",
             elements: elements,
-            screen: screen,
+            bounds: CGRect(origin: .zero, size: screen),
             source: .ocr
         )
     }

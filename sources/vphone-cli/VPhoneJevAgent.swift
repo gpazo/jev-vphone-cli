@@ -120,10 +120,12 @@ final class VPhoneJevAgent {
 
     /// Installed apps offered as `open_app` options. Empty disables the branch.
     var installedApps: [(bundleId: String, name: String)] = []
-    /// Ground truth code has checked — e.g. a `settingsGet` reading — shown
-    /// to the model separately from what the screen appears to say. Nothing
-    /// populates this yet; it is the seam for goal-specific verification.
-    var verifiedFacts: [String] = []
+    /// Reads observed device state, so "did it work" is answered by fact
+    /// rather than by the model's reading of its own screenshot.
+    var facts: (any JevFactProvider)?
+    /// Populated from `facts` each step; shown to the model separately from
+    /// what the screen appears to say.
+    private(set) var verifiedFacts: [String] = []
     /// Asked before a risky or low-confidence action. Returning false stops.
     var confirm: @MainActor (String) async -> Bool = { _ in false }
     /// Called after every step, for live output.
@@ -154,6 +156,10 @@ final class VPhoneJevAgent {
     func run() async throws -> Outcome {
         let textCandidates = JevTextCandidates.extract(from: goal)
 
+        // Baseline before anything is touched, so later readings describe
+        // what this run changed rather than how the device happened to be.
+        let baseline = await facts?.snapshot() ?? [:]
+
         var lastSignature: String?
 
         for index in 1 ... policy.maxSteps {
@@ -170,6 +176,10 @@ final class VPhoneJevAgent {
                 )
             }
             lastSignature = observation.signature
+
+            if let facts {
+                verifiedFacts = await facts.changes(since: baseline)
+            }
 
             let state = JevState(
                 goal: goal,
@@ -339,15 +349,103 @@ final class VPhoneJevAgent {
                 }
             }
 
-            try await execute(executable)
-            report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, true, response)
-            history.append(JevHistoryEntry(action: plan.detail, changedScreen: nil))
+            var detail = plan.detail
+            if case let .tap(element) = executable {
+                let result = await tapFindingControl(element, in: observation)
+                if result.why != "label" {
+                    detail += " (\(result.why))"
+                }
+                // The retry already re-observed, so the next step's settle has
+                // nothing left to wait for.
+                lastSignature = nil
+            } else {
+                try await execute(executable)
+            }
+
+            report(index, action, confidence, detail, doneP, blockedP, riskyP, true, response)
+            history.append(JevHistoryEntry(action: detail, changedScreen: nil))
 
             try? await Task.sleep(nanoseconds: UInt64(policy.settleMilliseconds) * 1_000_000)
         }
 
 
         return .exhausted(steps: policy.maxSteps)
+    }
+
+    // MARK: Tapping
+
+    /// Where a control might be, given where its label is.
+    private struct TapCandidate {
+        let point: CGPoint
+        /// Named in step output so a retry is visible rather than mysterious.
+        let why: String
+    }
+
+    /// Tap an element, retrying where the control actually lives when the
+    /// first attempt changes nothing.
+    ///
+    /// OCR reports where an element's *text* is. The control it labels may be
+    /// somewhere else, and where depends on the control type, which the text
+    /// does not reveal — measured on iOS 18.5, a Settings switch sits about
+    /// 90% across its row while a home screen icon sits about 5% of screen
+    /// height above its label.
+    ///
+    /// Rather than guess an offset up front — a wrong guess fails silently —
+    /// this taps the label and lets the screen say whether it worked. Each
+    /// retry costs one observation and no model call, and only happens after
+    /// a tap has provably done nothing, so the point being retried is one the
+    /// screen just ignored.
+    ///
+    /// Returns whether anything changed.
+    private func tapFindingControl(
+        _ element: JevElement, in observation: JevObservation
+    ) async -> (changed: Bool, why: String) {
+        let before = observation.signature
+
+        for candidate in tapCandidates(for: element, in: observation) {
+            try? await actuator.tap(at: candidate.point)
+            try? await Task.sleep(nanoseconds: UInt64(policy.settleMilliseconds) * 1_000_000)
+
+            // No observation means no evidence it failed; assume it landed
+            // rather than tapping again somewhere else.
+            guard let after = try? await provider.observe() else {
+                return (true, candidate.why)
+            }
+            if after.signature != before {
+                return (true, candidate.why)
+            }
+        }
+        return (false, "no effect")
+    }
+
+    /// The label point first, then the places a control hides relative to it.
+    ///
+    /// Only OCR needs the alternatives: an accessibility tree reports the
+    /// control's own frame, so its point is already right.
+    private func tapCandidates(
+        for element: JevElement, in observation: JevObservation
+    ) -> [TapCandidate] {
+        var candidates = [TapCandidate(point: element.point, why: "label")]
+        guard observation.source == .ocr else { return candidates }
+
+        let bounds = observation.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return candidates }
+
+        let rowControl = TapCandidate(
+            point: CGPoint(x: bounds.minX + bounds.width * 0.90, y: element.point.y),
+            why: "row control"
+        )
+        let aboveLabel = TapCandidate(
+            point: CGPoint(x: element.point.x, y: element.point.y - bounds.height * 0.05),
+            why: "above label"
+        )
+
+        // A label hugging the left edge reads as a list row, whose control is
+        // at the far right; anything more centred reads as an icon caption,
+        // whose control is above it.
+        let isLeftAligned = element.point.x < bounds.minX + bounds.width * 0.45
+        candidates.append(contentsOf: isLeftAligned ? [rowControl, aboveLabel] : [aboveLabel, rowControl])
+        return candidates
     }
 
     // MARK: Freshness

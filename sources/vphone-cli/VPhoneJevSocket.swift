@@ -126,7 +126,8 @@ struct JevSocketObserver: JevObservationProvider {
         return JevObservation(
             foregroundApp: response["foreground"] as? String ?? "unknown",
             elements: elements,
-            screen: CGSize(
+            bounds: CGRect(
+                x: 0, y: 0,
                 width: screenInfo["width"] as? Int ?? 0,
                 height: screenInfo["height"] as? Int ?? 0
             ),

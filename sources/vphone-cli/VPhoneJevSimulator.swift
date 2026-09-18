@@ -193,7 +193,7 @@ struct JevSimulatorObserver: JevObservationProvider {
         return JevObservation(
             foregroundApp: "iOS Simulator",
             elements: elements,
-            screen: screenRect.size,
+            bounds: screenRect,
             // OCR, not a semantic tree: the Simulator does not publish one.
             source: .ocr
         )

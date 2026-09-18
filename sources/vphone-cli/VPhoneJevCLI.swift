@@ -93,12 +93,14 @@ struct VPhoneJevCommand: ParsableCommand {
         let observer: any JevObservationProvider
         let liveActuator: any JevActuator
         var apps: [(bundleId: String, name: String)] = []
+        var factProvider: (any JevFactProvider)?
 
         if let simulator {
             let simObserver = JevSimulatorObserver(udid: simulator)
             observer = simObserver
             apps = simObserver.installedApps()
             liveActuator = JevSimulatorActuator(udid: simulator)
+            factProvider = JevSimulatorFacts(udid: simulator)
         } else {
             let socketClient = VPhoneJevSocketClient(socketPath: socket)
             let socketObserver = JevSocketObserver(client: socketClient)
@@ -128,6 +130,7 @@ struct VPhoneJevCommand: ParsableCommand {
             mode: dryRun ? .dryRun : (yes ? .unattended : .live)
         )
         agent.installedApps = apps
+        agent.facts = factProvider
         agent.confirm = Self.confirmOnStdin
         agent.onStep = { step in Self.print(step, verbose: verbose) }
 

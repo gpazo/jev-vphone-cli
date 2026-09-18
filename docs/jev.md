@@ -232,11 +232,26 @@ differs by control type, and nothing in the text tells you which:
 
 Both were confirmed by hand: tapping "Settings" did nothing while tapping 130px
 higher opened it; tapping "Bold Text" did nothing while tapping the switch
-position turned it on. Code compensates for the icon case — a tap on an element
-whose label exactly names an installed app resolves to `open_app`, which has no
-coordinates to get wrong — but the general case needs control bounds, which
-only a semantic tree has. This is the sharpest argument yet for
-`research/jev_accessibility_spike.md`.
+position turned it on.
+
+**Taps therefore find the control rather than assume it.** A wrong offset
+guessed up front fails silently, so instead the agent taps the label and lets
+the screen say whether it worked — retrying at the row's right edge, then above
+the label, stopping as soon as something changes. Each retry costs one
+observation and **no model call**, and only happens after a tap has provably
+done nothing, so the point being retried is one the screen just ignored. Step
+output names the retry that landed:
+
+```
+→ 5  tap "Bold Text" (row control)   conf 0.89
+```
+
+Where the label exactly names an installed app, a tap resolves to `open_app`
+instead, which has no coordinates to get wrong at all.
+
+This works, but it is compensation for missing information. A semantic tree
+reports the control's own frame and needs none of it — still the best argument
+for `research/jev_accessibility_spike.md`.
 
 ### Two other findings from real hardware
 
@@ -281,18 +296,30 @@ also faster than a fixed sleep, since most transitions finish well inside that.
 An unchanged screen is a legitimate outcome, so it proceeds and lets stuck
 detection decide.
 
-## Verification (partly built)
+## Verification against the device
 
-Model judgment should decide *what to do*; observed facts should decide *what
-happened*. `JevState.verifiedFacts` is the channel for the second half — facts
-code has checked, kept separate from what the screen appears to say, and
-referenced by the `done` question only when present.
+Model judgment decides *what to do*; observed facts decide *what happened*.
+`JevState.verifiedFacts` carries the second half, and it is now populated.
 
-**Nothing populates it yet.** Today `done` is judged from the observation alone.
-The intended source is the guest itself: "did airplane mode actually turn on" is
-a `settingsGet(domain:key:)` reading, not a screenshot interpretation. Wiring it
-needs a goal→setting mapping that does not generalise, so it is left as a seam
-on `VPhoneJevAgent` rather than guessed at.
+Rather than map goals to settings keys — which does not generalise — the agent
+snapshots device preferences before it starts and reports what **changed**
+since. That is goal agnostic and it is fact: *"Device setting
+EnhancedTextLegibilityEnabled changed from 0 to 1"* answers "did it work"
+without anyone having to anticipate the question. On the Simulator this reads
+through `simctl spawn defaults`; the VM equivalent is `settingsGet`.
+
+This closes a failure that is easy to miss: **the agent can succeed and not
+know it.** Measured on iOS 18.5 before facts were wired, goal "turn off Bold
+Text" — it flipped the toggle at step 6, navigated away at step 7, and gave up
+at step 8 with `done` at 0.31. It had done the job and could no longer see the
+evidence. With facts, the same task reports `done` 0.67 and stops correctly.
+
+Both directions verified independently on the device:
+
+| goal | steps | `defaults read` after |
+|---|---|---|
+| turn **on** Bold Text | 7 | `EnhancedTextLegibilityEnabled = 1` |
+| turn **off** Bold Text | 6 | `EnhancedTextLegibilityEnabled = 0` |
 
 ## Cost
 
