@@ -31,7 +31,9 @@ enum JevAction: String, CaseIterable {
         case .pressHome:
             "Press the hardware home button to leave the current app and return to the home screen."
         case .openApp:
-            "Launch a different app directly, rather than navigating to it by tapping."
+            """
+            Launch an app directly by identifier. Prefer this over tapping an app icon             whenever the goal needs a different app: launching is exact, while an icon             has to be located on screen and may be missed.
+            """
         case .wait:
             "Do nothing this step because the screen is mid-transition, loading, or otherwise not ready to act on."
         case .finish:

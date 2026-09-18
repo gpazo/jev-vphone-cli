@@ -30,6 +30,13 @@ struct VPhoneJevCommand: ParsableCommand {
     @Option(help: "Automation socket of the running VM.")
     var socket: String = "vm/vphone.sock"
 
+    @Option(
+        help: """
+        Drive a booted iOS Simulator device by UDID instead of the vphone VM.         Observation is OCR over `simctl io screenshot`; taps are synthetic events,         so the host terminal needs Accessibility permission.
+        """
+    )
+    var simulator: String?
+
     @Flag(help: "Decide and report every step without touching the phone.")
     var dryRun = false
 
@@ -82,16 +89,32 @@ struct VPhoneJevCommand: ParsableCommand {
     @MainActor
     private func execute() async throws {
         let client = try VPhoneJevClient(apiKey: apiKey, model: model)
-        let socketClient = VPhoneJevSocketClient(socketPath: socket)
 
-        let observer = JevSocketObserver(client: socketClient)
-        // One probe up front: fails fast with a useful message if the VM is
-        // not running, rather than after the first API call is billed.
+        let observer: any JevObservationProvider
+        let liveActuator: any JevActuator
+        var apps: [(bundleId: String, name: String)] = []
+
+        if let simulator {
+            let simObserver = JevSimulatorObserver(udid: simulator)
+            observer = simObserver
+            apps = simObserver.installedApps()
+            liveActuator = JevSimulatorActuator(udid: simulator)
+        } else {
+            let socketClient = VPhoneJevSocketClient(socketPath: socket)
+            let socketObserver = JevSocketObserver(client: socketClient)
+            observer = socketObserver
+            apps = socketObserver.installedApps()
+            liveActuator = JevSocketActuator(
+                client: socketClient,
+                screen: try await socketObserver.observe().screen
+            )
+        }
+
+        // One probe up front: fails fast with a useful message if the target
+        // is not running, rather than after the first API call is billed.
         let probe = try await observer.observe()
 
-        let actuator: any JevActuator = dryRun
-            ? JevDryRunActuator()
-            : JevSocketActuator(client: socketClient, screen: probe.screen)
+        let actuator: any JevActuator = dryRun ? JevDryRunActuator() : liveActuator
 
         var policy = VPhoneJevAgent.Policy.default
         policy.maxSteps = maxSteps
@@ -104,7 +127,7 @@ struct VPhoneJevCommand: ParsableCommand {
             policy: policy,
             mode: dryRun ? .dryRun : (yes ? .unattended : .live)
         )
-        agent.installedApps = observer.installedApps()
+        agent.installedApps = apps
         agent.confirm = Self.confirmOnStdin
         agent.onStep = { step in Self.print(step, verbose: verbose) }
 

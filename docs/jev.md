@@ -185,6 +185,75 @@ The guard stays — it costs about 30 tokens and a stronger attack may well land
 but nothing here demonstrates it is load-bearing, and the test is in the repo so
 the claim can be re-checked when the attack or the model changes.
 
+## Running against the iOS Simulator
+
+The vphone VM needs SIP and AMFI disabled, which an ordinary Mac does not have.
+Apple's iOS Simulator runs real iOS with no such requirement, so it is the
+target that can actually be exercised:
+
+```sh
+xcrun simctl create jev-sim "iPhone 16 Pro" com.apple.CoreSimulator.SimRuntime.iOS-18-5
+xcrun simctl boot <udid> && open -a Simulator
+vphone-cli jev "open the Accessibility settings and turn on Bold Text" --simulator <udid> --yes
+```
+
+Needs Accessibility permission for the host terminal — not to read the UI, but
+because synthetic `CGEvent`s are silently discarded without it.
+
+**The Simulator does not publish iOS UI to the host accessibility tree.**
+Probing `Simulator.app` returns its own macOS chrome — Volume, Sleep/Wake,
+Home, Rotate and 239 menu items — while the device screen is a single
+`AXGroup` with no children. So observation here is OCR. What the AX tree *is*
+good for is that opaque group's frame, which converts an OCR hit in device
+pixels into a host point worth clicking.
+
+### What works, and the wall it hits
+
+Measured on iOS 18.5, goal "open the Accessibility settings and turn on Bold
+Text":
+
+```
+→ 1  open Settings                conf 0.94
+→ 2  tap "Accessibility"          conf 0.97
+→ 3  tap "Display & Text Size"    conf 0.93
+→ 4  tap "Bold Text"              conf 0.97   ← lands on the label, not the switch
+```
+
+Navigation is solid: three correct drill-downs at 0.93–0.97. The run then
+stalls, and the reason is the central limitation of OCR observation:
+
+**OCR reports where the _text_ is, not where the _control_ is.** The offset
+differs by control type, and nothing in the text tells you which:
+
+| control | label position | control position |
+|---|---|---|
+| home screen icon | below the icon | ~130px **above** the label |
+| Settings switch row | left of the row | ~860px **right** of the label |
+
+Both were confirmed by hand: tapping "Settings" did nothing while tapping 130px
+higher opened it; tapping "Bold Text" did nothing while tapping the switch
+position turned it on. Code compensates for the icon case — a tap on an element
+whose label exactly names an installed app resolves to `open_app`, which has no
+coordinates to get wrong — but the general case needs control bounds, which
+only a semantic tree has. This is the sharpest argument yet for
+`research/jev_accessibility_spike.md`.
+
+### Two other findings from real hardware
+
+**The Simulator has no radios**, so Settings has no Airplane Mode, Wi-Fi,
+Bluetooth or Cellular pane. The first live run chased a goal the device could
+not satisfy and scrolled until the step budget bit. Worth knowing before
+writing test goals — and a reminder that `jev_fake_phone.py` models tasks the
+real target may not have.
+
+**Offering two equally good actions splits the probability.** Once `open_app`
+became available alongside `tap`, action confidence for "get to Settings" fell
+from ~0.8 to ~0.3 — not because the model was confused about what to do, but
+because two options were both right. TypeSafe's docs anticipate this: several
+acceptable alternatives spread probability, and low confidence need not
+invalidate a harmless choice. The confidence *stop* is therefore gated on risk,
+exactly like the confirm gate.
+
 ## Observation
 
 Jev takes text only, so the screen must be textified first. Two providers fill

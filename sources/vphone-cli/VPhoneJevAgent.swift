@@ -49,7 +49,10 @@ final class VPhoneJevAgent {
         var blocked = 0.6
         /// Require confirmation at or above this `risky` probability.
         var risky = 0.5
-        /// Below this action confidence, stop rather than guess.
+        /// Below this action confidence, stop rather than guess — but only
+        /// when the step is consequential, see `confirmUncertainAboveRisk`.
+        /// Two equally good ways to do the same safe thing split the
+        /// probability between them, which is not a reason to give up.
         var stopBelowConfidence = 0.5
         /// Between the two, act only after confirmation — but only when the
         /// step is also somewhat consequential, see `confirmUncertainAboveRisk`.
@@ -275,7 +278,9 @@ final class VPhoneJevAgent {
 
             // ── Gates ──
 
-            if confidence < policy.stopBelowConfidence {
+            if confidence < policy.stopBelowConfidence,
+               riskyP >= policy.confirmUncertainAboveRisk
+            {
                 report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, response)
                 return .stopped(
                     reason: "confidence \(pct(confidence)) too low to act on \(plan.detail)",
@@ -439,6 +444,9 @@ final class VPhoneJevAgent {
             constraints.append(
                 "`elements` comes from reading text off the screen. A control with no text label does not appear at all, and a switch's on/off state cannot be seen — absence from this list does not mean absence from the screen."
             )
+            constraints.append(
+                "Each element sits where its *text* is, which is not always where the control is: a home screen icon is above its label, and tapping the label does nothing. Launching an app by identifier is more reliable than tapping its icon."
+            )
         }
 
         return JevDevice(
@@ -516,6 +524,22 @@ final class VPhoneJevAgent {
             }
             guard let element = observation.element(id: choice) else {
                 throw PlanError(description: "Jev selected unknown element \(choice)")
+            }
+
+            // Mechanics, not judgment: the model decided to open this thing,
+            // and when the thing is an installed app there is an exact way to
+            // do that. Under OCR an element sits where its *text* is, so an
+            // app icon's label is below the icon and tapping it misses —
+            // measured on the iOS Simulator, where tapping "Settings" did
+            // nothing and tapping 130px higher opened it. Launching by
+            // identifier has no coordinates to get wrong, and relaunching a
+            // frontmost app just brings it forward.
+            if observation.source == .ocr,
+               let app = installedApps.first(where: {
+                   $0.name.compare(element.label, options: .caseInsensitive) == .orderedSame
+               })
+            {
+                return .launch(bundleId: app.bundleId, name: app.name)
             }
             return .tap(element)
 
