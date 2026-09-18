@@ -178,7 +178,9 @@ struct JevSocketActuator: JevActuator {
     }
 
     func type(_ text: String) async throws {
-        try client.send(["t": "type", "text": text, "screen": false])
+        // "typetext", not "type": the latter only sets the guest clipboard,
+        // so nothing would ever appear in the focused field.
+        try client.send(["t": "typetext", "text": text, "screen": false])
     }
 
     func pressHome() async throws {

@@ -126,7 +126,7 @@ final class VPhoneJevAgent {
     /// Called after every step, for live output.
     var onStep: @MainActor (Step) -> Void = { _ in }
 
-    private var history: [String] = []
+    private var history: [JevHistoryEntry] = []
     private var recentSignatures: [String] = []
     private(set) var totalInputTokens = 0
 
@@ -159,6 +159,12 @@ final class VPhoneJevAgent {
                 observation = try await observeSettled(after: lastSignature)
             } catch {
                 return .stopped(reason: "could not observe the phone: \(error)", steps: index - 1)
+            }
+            if let previous = lastSignature, let last = history.indices.last {
+                history[last] = JevHistoryEntry(
+                    action: history[last].action,
+                    changedScreen: observation.signature != previous
+                )
             }
             lastSignature = observation.signature
 
@@ -194,10 +200,17 @@ final class VPhoneJevAgent {
             let blockedP = response[JevQuestions.blocked]?.noul ?? 0
             let riskyP = response[JevQuestions.risky]?.noul ?? 0
 
-            guard let actionAnswer = response[JevQuestions.action],
-                  let raw = actionAnswer.choice,
-                  let action = JevAction(rawValue: raw)
-            else {
+            let offeredActions = JevQuestions.availableActions(
+                observation: observation, apps: installedApps, textCandidates: textCandidates
+            ).map(\.rawValue)
+
+            guard let actionAnswer = response[JevQuestions.action] else {
+                return .stopped(reason: "Jev returned no action answer", steps: index)
+            }
+            if let failure = actionAnswer.validated(against: offeredActions) {
+                return .stopped(reason: "unusable action answer — \(failure)", steps: index)
+            }
+            guard let raw = actionAnswer.choice, let action = JevAction(rawValue: raw) else {
                 return .stopped(reason: "Jev returned no usable action", steps: index)
             }
 
@@ -255,7 +268,7 @@ final class VPhoneJevAgent {
             // The gates below ask whether we *should* act. This asks whether
             // the action is possible at all, which is a different question
             // and one code can often answer from the observation.
-            if let refusal = infeasible(plan, observation: observation) {
+            if let refusal = infeasible(plan) {
                 report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, response)
                 return .stopped(reason: refusal, steps: index)
             }
@@ -303,7 +316,7 @@ final class VPhoneJevAgent {
 
             try await execute(plan)
             report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, true, response)
-            history.append(plan.detail)
+            history.append(JevHistoryEntry(action: plan.detail, changedScreen: nil))
 
             try? await Task.sleep(nanoseconds: UInt64(policy.settleMilliseconds) * 1_000_000)
         }
@@ -372,22 +385,12 @@ final class VPhoneJevAgent {
 
     /// Refuse an action the observation says cannot work, and say why.
     ///
-    /// Only vetoes where there is actual evidence to veto on. An OCR
-    /// observation cannot report focus, so typing is not refused there —
-    /// declaring something impossible because we cannot see it would be
-    /// worse than trying it.
-    private func infeasible(_ plan: Plan, observation: JevObservation) -> String? {
+    /// Mostly empty by design: an action with no valid target is never
+    /// offered in the first place (see `JevQuestions.availableActions`), which
+    /// is more reliable than letting the model choose and refusing afterwards.
+    /// What remains is a consistency check between question and resolution.
+    private func infeasible(_ plan: Plan) -> String? {
         switch plan {
-        case .type:
-            guard observation.source == .accessibility else { return nil }
-            let hasTextInput = observation.elements.contains { element in
-                guard let role = element.role?.lowercased() else { return false }
-                return role.contains("text") || role.contains("search") || role.contains("field")
-            }
-            return hasTextInput
-                ? nil
-                : "Jev chose to type, but no text input is present on screen"
-
         // Defence in depth rather than a live check: the app options offered
         // to Jev are built from this same list, so a selection outside it
         // means the question and the resolution have drifted apart.
@@ -441,7 +444,7 @@ final class VPhoneJevAgent {
     ) throws -> Plan {
         switch action {
         case .tap:
-            guard let choice = response[JevQuestions.target]?.choice, choice != "none" else {
+            guard let choice = response[JevQuestions.tapTarget]?.choice, choice != "none" else {
                 throw PlanError(description: "Jev chose to tap but selected no element")
             }
             guard let element = observation.element(id: choice) else {

@@ -75,6 +75,52 @@ struct JevAnswer: Decodable {
         guard let choice, let probabilities else { return 0 }
         return probabilities[choice] ?? 0
     }
+
+    /// Check a Choice answer against the options that were actually offered.
+    ///
+    /// Typed output guarantees the shape of the interface, not that the
+    /// contents make sense. Acting on a malformed distribution — one that
+    /// names an option nobody offered, or whose mass does not sum to one —
+    /// means acting on something that is not a judgment at all, so the caller
+    /// is told rather than left to act on it.
+    func validated(against offered: some Collection<String>) -> ValidationFailure? {
+        guard let choice else { return .missingChoice }
+        guard offered.contains(choice) else { return .unofferedOption(choice) }
+        guard let probabilities else { return .missingProbabilities }
+        guard Set(probabilities.keys) == Set(offered) else { return .mismatchedOptions }
+
+        let values = probabilities.values
+        guard values.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }) else {
+            return .probabilityOutOfRange
+        }
+        guard abs(values.reduce(0, +) - 1) < 0.02 else { return .probabilitiesDoNotSum }
+        guard let top = values.max(), (probabilities[choice] ?? 0) >= top - 1e-6 else {
+            return .choiceIsNotArgmax
+        }
+        return nil
+    }
+
+    enum ValidationFailure: CustomStringConvertible {
+        case missingChoice
+        case unofferedOption(String)
+        case missingProbabilities
+        case mismatchedOptions
+        case probabilityOutOfRange
+        case probabilitiesDoNotSum
+        case choiceIsNotArgmax
+
+        var description: String {
+            switch self {
+            case .missingChoice: "answer carried no choice"
+            case let .unofferedOption(option): "chose \"\(option)\", which was not offered"
+            case .missingProbabilities: "answer carried no probabilities"
+            case .mismatchedOptions: "probabilities do not cover exactly the offered options"
+            case .probabilityOutOfRange: "a probability was not a finite value in 0...1"
+            case .probabilitiesDoNotSum: "probabilities do not sum to 1"
+            case .choiceIsNotArgmax: "the chosen option is not the most probable one"
+            }
+        }
+    }
 }
 
 struct JevUsage: Decodable {

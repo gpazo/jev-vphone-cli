@@ -29,6 +29,7 @@ class VPhoneHostControl {
     private let acceptQueue = DispatchQueue(label: "vphone.hostcontrol.accept")
 
     private weak var captureView: VPhoneVirtualMachineView?
+    private weak var keyHelper: VPhoneKeyHelper?
     private var screenRecorder: VPhoneScreenRecorder?
     private weak var control: VPhoneControl?
 
@@ -58,9 +59,11 @@ class VPhoneHostControl {
         screenRecorder: VPhoneScreenRecorder,
         control: VPhoneControl,
         screenWidth: Int,
-        screenHeight: Int
+        screenHeight: Int,
+        keyHelper: VPhoneKeyHelper? = nil
     ) {
         self.captureView = captureView
+        self.keyHelper = keyHelper
         self.screenRecorder = screenRecorder
         self.control = control
         self.screenWidth = screenWidth
@@ -402,6 +405,37 @@ class VPhoneHostControl {
                     }
                 } catch {
                     result.error = "\(error)"
+                }
+            }
+
+            semaphore.wait()
+            writeResponse(fd, ok: result.ok, error: result.error, image: result.imageBase64)
+
+        case "typetext":
+            // Synthesised keystrokes into whatever currently has focus —
+            // distinct from "type", which sets the guest clipboard and is
+            // left alone because the documented socket API promises that.
+            guard let text = json["text"] as? String else {
+                writeResponse(fd, ok: false, error: "typetext requires text")
+                return
+            }
+            let semaphore = DispatchSemaphore(value: 0)
+            let result = ResultBox()
+
+            Task { @MainActor in
+                defer { semaphore.signal() }
+                guard let controller, let keys = controller.keyHelper else {
+                    result.error = "no keyboard available (run with a VM window)"
+                    return
+                }
+                keys.typeString(text)
+                result.ok = true
+                if wantScreen {
+                    // Keystrokes are dispatched on a timer, so wait for the
+                    // string to land before capturing.
+                    let typingMs = text.count * 20 + screenDelay
+                    try? await Task.sleep(nanoseconds: UInt64(typingMs) * 1_000_000)
+                    result.imageBase64 = await controller.captureCompactScreenshot()
                 }
             }
 

@@ -161,7 +161,8 @@ class VPhoneAppDelegate: NSObject, NSApplicationDelegate {
                 screenRecorder: recorder,
                 control: control,
                 screenWidth: options.screenWidth,
-                screenHeight: options.screenHeight
+                screenHeight: options.screenHeight,
+                keyHelper: keyHelper
             )
             hostControl = hc
 
