@@ -265,10 +265,32 @@ struct JevSimulatorActuator: JevActuator {
         post(.leftMouseUp, at: CGPoint(x: x, y: toY))
     }
 
-    /// Through the device pasteboard: `simctl pbcopy` is far more reliable
-    /// than synthesising a key event per character into another process.
+    /// Real keystrokes into whatever field has focus.
+    ///
+    /// Not `simctl pbcopy`, which only loads the device pasteboard and types
+    /// nothing — the same trap as the VM's "type" command, which sets the
+    /// clipboard and is why "typetext" exists there. The Simulator connects a
+    /// hardware keyboard by default, so key events reach the focused field.
+    ///
+    /// Characters are sent as Unicode rather than mapped to virtual keycodes,
+    /// which keeps punctuation and non-ASCII working without a layout table.
     func type(_ text: String) async throws {
-        try VPhoneJevSimulator.simctl(["pbcopy", udid], input: text)
+        try VPhoneJevSimulator.preflight()
+        VPhoneJevSimulator.app()?.activate()
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        let source = CGEventSource(stateID: .hidSystemState)
+        for character in text {
+            var utf16 = Array(String(character).utf16)
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)
+            else { continue }
+            down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+            up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
     }
 
     func pressHome() async throws {
