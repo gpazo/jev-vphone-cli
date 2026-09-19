@@ -234,7 +234,7 @@ struct JevOCRProvider: JevObservationProvider {
         let width = Double(image.width)
         let height = Double(image.height)
 
-        return (request.results ?? [])
+        let recognised = (request.results ?? [])
             .compactMap { observation -> JevElement? in
                 guard let candidate = observation.topCandidates(1).first,
                       candidate.confidence >= minimumConfidence
@@ -256,6 +256,8 @@ struct JevOCRProvider: JevObservationProvider {
             }
             // Reading order: top to bottom, then left to right.
             .sorted { ($0.point.y, $0.point.x) < ($1.point.y, $1.point.x) }
+
+        return mergeRowValues(recognised, width: Double(image.width))
             .enumerated()
             .map { index, element in
                 JevElement(
@@ -266,5 +268,44 @@ struct JevOCRProvider: JevObservationProvider {
                     point: element.point
                 )
             }
+    }
+
+    /// Fold a settings row's value into its label.
+    ///
+    /// OCR reports text, so a row like "Larger Text … Off ›" arrives as two
+    /// unrelated elements, and the loose "Off ›" reads as something tappable
+    /// in its own right — a real run tapped it at 0.99 confidence believing it
+    /// was the toggle it wanted. Merging gives the model "Larger Text =
+    /// Off", which is the structure a semantic tree would have supplied.
+    ///
+    /// Deliberately narrow: only a row holding exactly two pieces of text,
+    /// one starting at the left margin and one ending at the right. A home
+    /// screen row of four evenly spaced icon captions does not qualify, and
+    /// nor does a keyboard row.
+    static func mergeRowValues(_ elements: [JevElement], width: Double) -> [JevElement] {
+        let rows = Dictionary(grouping: elements) { Int(($0.point.y / 20).rounded()) }
+        var merged: [JevElement] = []
+
+        for key in rows.keys.sorted() {
+            let row = (rows[key] ?? []).sorted { $0.point.x < $1.point.x }
+            guard row.count == 2, let label = row.first, let value = row.last,
+                  label.point.x < width * 0.5, value.point.x > width * 0.72
+            else {
+                merged.append(contentsOf: row)
+                continue
+            }
+            merged.append(
+                JevElement(
+                    id: label.id,
+                    role: label.role,
+                    label: label.label,
+                    // Trim the disclosure chevron; it is decoration.
+                    value: value.label.replacingOccurrences(of: ">", with: "")
+                        .trimmingCharacters(in: .whitespaces),
+                    point: label.point
+                )
+            )
+        }
+        return merged.sorted { ($0.point.y, $0.point.x) < ($1.point.y, $1.point.x) }
     }
 }

@@ -76,6 +76,8 @@ help:
 	@echo "  make jev_probe               Accessibility spike recon against the guest"
 	@echo "  make jev_fake PROMPT=\"...\"   Run the agent against the fake phone (no VM needed)"
 	@echo "  make jev_guards              Freshness guards: screen changes mid-decision"
+	@echo "  make jev_demo SIM=<udid>     End-to-end demo on a booted iOS Simulator,"
+	@echo "                               with the result proved against the device"
 	@echo "    Options: SCREEN=photos     Fake phone's starting screen (home|settings|photos)"
 	@echo "  Requires TYPESAFE_API_KEY in the environment."
 	@echo ""
@@ -355,7 +357,7 @@ boot_dfu: build boot_binary_check
 # Jev — natural-language control of a running VM
 # ═══════════════════════════════════════════════════════════════════
 
-.PHONY: jev jev_dry jev_probe jev_fake jev_guards
+.PHONY: jev jev_dry jev_probe jev_fake jev_guards jev_demo
 
 # The jev subcommand is a plain automation-socket client: it needs no
 # private entitlements, and signing the binary with them makes AMFI refuse
@@ -395,6 +397,24 @@ jev_guards: patcher_build
 	echo; echo "guard 3/3  screen navigates away — must re-decide, not tap blind"; \
 	MUTATE=navigate:2 $(MAKE) --no-print-directory jev_fake PROMPT="turn on airplane mode" \
 		SCREEN=settings JEV_ARGS=--yes 2>&1 | grep -E "MUTATED|tapped|^  (→|·)" || true
+
+# End-to-end demo on a booted iOS Simulator, with the outcome proved
+# against the device rather than taken from the agent's own report.
+#   make jev_demo SIM=<udid>
+jev_demo: patcher_build
+	@if [ -z "$(SIM)" ]; then echo "Usage: make jev_demo SIM=<simulator-udid>"; echo "  xcrun simctl list devices booted"; exit 1; fi
+	@set -e; \
+	echo "── before ─────────────────────────────────────────────"; \
+	xcrun simctl spawn "$(SIM)" defaults read com.apple.Accessibility 2>/dev/null \
+		| grep -E "EnhancedTextLegibility|DarkenSystemColors" || echo "  (not set)"; \
+	echo; echo "── agent ──────────────────────────────────────────────"; \
+	xcrun simctl terminate "$(SIM)" com.apple.Preferences >/dev/null 2>&1 || true; \
+	sleep 2; \
+	"$(CURDIR)/$(JEV_BINARY)" jev "$(if $(PROMPT),$(PROMPT),turn on Bold Text in Accessibility settings)" \
+		--simulator "$(SIM)" --yes $(JEV_ARGS); \
+	echo "── after (ground truth from the device) ───────────────"; \
+	xcrun simctl spawn "$(SIM)" defaults read com.apple.Accessibility 2>/dev/null \
+		| grep -E "EnhancedTextLegibility|DarkenSystemColors" || echo "  (not set)"
 
 # Drive the agent against the fake phone — no VM required.
 jev_fake: patcher_build

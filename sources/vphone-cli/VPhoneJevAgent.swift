@@ -46,7 +46,21 @@ final class VPhoneJevAgent {
         /// which that counts as success rather than giving up.
         var finishAccepted = 0.5
         /// Hand back to the human at or above this `blocked` probability.
-        var blocked = 0.6
+        ///
+        /// Measured on real permission dialogs, which sat at 0.54-0.59 — just
+        /// under the old 0.6, so the agent granted location access on its own.
+        /// Handing those back is the whole point of the gate.
+        var blocked = 0.45
+        /// Cap on interstitials dismissed in code, so a screen that keeps
+        /// re-presenting one cannot loop.
+        var maxInterstitials = 4
+        /// Consecutive scrolls before the loop is treated as lost.
+        ///
+        /// Stuck detection cannot catch this: every scroll changes the screen,
+        /// so it looks like progress. A real run scrolled eleven times in a
+        /// row hunting for a settings row, turning a six-step task into
+        /// twenty-four.
+        var maxConsecutiveScrolls = 6
         /// Require confirmation at or above this `risky` probability.
         var risky = 0.5
         /// Below this action confidence, stop rather than guess — but only
@@ -136,6 +150,8 @@ final class VPhoneJevAgent {
 
     private var history: [JevHistoryEntry] = []
     private var recentSignatures: [String] = []
+    private var interstitialsDismissed = 0
+    private var consecutiveScrolls = 0
     private(set) var totalInputTokens = 0
 
     init(
@@ -179,6 +195,20 @@ final class VPhoneJevAgent {
                 )
             }
             lastSignature = observation.signature
+
+            // Clear interstitials before asking anything: they are not a
+            // judgment, and they otherwise eat a step each.
+            if interstitialsDismissed < policy.maxInterstitials,
+               let dismissal = interstitialDismissal(in: observation)
+            {
+                interstitialsDismissed += 1
+                _ = await tapFindingControl(dismissal, in: observation)
+                history.append(
+                    JevHistoryEntry(action: "dismissed \"\(dismissal.label)\"", changedScreen: true)
+                )
+                lastSignature = nil
+                continue
+            }
 
             if let facts {
                 verifiedFacts = await facts.changes(since: baseline)
@@ -252,6 +282,21 @@ final class VPhoneJevAgent {
                 return doneP >= policy.finishAccepted
                     ? .achieved(steps: index)
                     : .stopped(reason: "Jev stopped without the goal being met", steps: index)
+            }
+
+            // Scrolling forever is its own failure: it changes the screen
+            // every time, so it reads as progress to every other guard.
+            if action == .scrollDown || action == .scrollUp {
+                consecutiveScrolls += 1
+                if consecutiveScrolls > policy.maxConsecutiveScrolls {
+                    report(index, action, confidence, "scrolling without progress", doneP, blockedP, riskyP, false, response)
+                    return .stopped(
+                        reason: "scrolled \(consecutiveScrolls) times in a row without finding anything",
+                        steps: index
+                    )
+                }
+            } else {
+                consecutiveScrolls = 0
             }
 
             // Stuck detection is code's job, not the model's: the model sees
@@ -373,6 +418,34 @@ final class VPhoneJevAgent {
 
 
         return .exhausted(steps: policy.maxSteps)
+    }
+
+    // MARK: Interstitials
+
+    /// Buttons that decline whatever is being offered.
+    ///
+    /// Declining is always the neutral choice, so tapping one needs no
+    /// judgment — which matters because apps throw these constantly on first
+    /// launch (dictation prompts, tracking prompts, promos) and each one
+    /// otherwise costs a model call and a step. Anything that *accepts* is
+    /// deliberately absent: granting a permission is consequential and stays
+    /// behind the `blocked` gate.
+    private static let decliningLabels: Set<String> = [
+        "not now", "skip", "maybe later", "later", "dismiss", "no thanks",
+        "don't allow", "dont allow", "ask app not to track",
+    ]
+
+    /// A declining button on screen, if this looks like an interstitial.
+    ///
+    /// Requires a sparse screen: a declining label among many elements is
+    /// more likely ordinary UI than a sheet demanding an answer.
+    private func interstitialDismissal(in observation: JevObservation) -> JevElement? {
+        guard observation.elements.count <= 14 else { return nil }
+        return observation.elements.first { element in
+            Self.decliningLabels.contains(
+                element.label.lowercased().trimmingCharacters(in: .whitespaces)
+            )
+        }
     }
 
     // MARK: Tapping
@@ -511,13 +584,22 @@ final class VPhoneJevAgent {
     /// than looping, and lets stuck detection make the call.
     private func observeSettled(after previous: String?) async throws -> JevObservation {
         var observation = try await provider.observe()
-        guard let previous, observation.signature == previous else { return observation }
+        guard let previous else { return observation }
 
         let deadline = Date().addingTimeInterval(Double(policy.settleTimeoutMilliseconds) / 1000)
         while Date() < deadline {
+            if observation.signature != previous {
+                // Changed — but a launching app shows a splash before its real
+                // first screen, and judging that produces "nothing to tap". So
+                // wait for the screen to stop changing, not merely to change.
+                try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
+                let again = try await provider.observe()
+                if again.signature == observation.signature { return again }
+                observation = again
+                continue
+            }
             try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
             observation = try await provider.observe()
-            if observation.signature != previous { return observation }
         }
         return observation
     }
@@ -620,8 +702,11 @@ final class VPhoneJevAgent {
     ) throws -> Plan {
         switch action {
         case .tap:
+            // No target usually means the screen is mid-transition rather
+            // than a dead end, so wait and look again. The step budget and
+            // stuck detection bound how long that can go on.
             guard let choice = response[JevQuestions.tapTarget]?.choice, choice != "none" else {
-                throw PlanError(description: "Jev chose to tap but selected no element")
+                return .wait
             }
             guard let element = observation.element(id: choice) else {
                 throw PlanError(description: "Jev selected unknown element \(choice)")
