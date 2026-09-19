@@ -265,6 +265,36 @@ struct JevSimulatorActuator: JevActuator {
         post(.leftMouseUp, at: CGPoint(x: x, y: toY))
     }
 
+    /// Drag vertically on one element. A picker wheel moves by roughly one
+    /// value per short drag, so this is deliberately small: the agent
+    /// re-observes after each and can repeat until it lands.
+    func drag(at point: CGPoint, up: Bool) async throws {
+        try VPhoneJevSimulator.preflight()
+        let screen = try VPhoneJevSimulator.deviceScreenRect()
+        VPhoneJevSimulator.app()?.activate()
+        try? await Task.sleep(nanoseconds: 120_000_000)
+
+        let distance = screen.height * 0.06
+        let end = CGPoint(x: point.x, y: point.y + (up ? -distance : distance))
+
+        // Timing matters more than distance here. A picker wheel ignores a
+        // fast sweep as a flick and snaps back; it only tracks a drag that
+        // settles before it moves and then travels slowly. Measured: a
+        // 160ms sweep moved nothing, while a 250ms hold followed by a 600ms
+        // sweep moved it two rows.
+        post(.leftMouseDown, at: point)
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        let steps = 30
+        for step in 1 ... steps {
+            let t = Double(step) / Double(steps)
+            post(.leftMouseDragged, at: CGPoint(x: point.x, y: point.y + (end.y - point.y) * t))
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        post(.leftMouseUp, at: end)
+    }
+
     /// Real keystrokes into whatever field has focus.
     ///
     /// Not `simctl pbcopy`, which only loads the device pasteboard and types

@@ -257,7 +257,15 @@ struct JevOCRProvider: JevObservationProvider {
             // Reading order: top to bottom, then left to right.
             .sorted { ($0.point.y, $0.point.x) < ($1.point.y, $1.point.x) }
 
-        return mergeRowValues(recognised, width: Double(image.width))
+        // The status bar is decoration — clock, battery, signal — and never
+        // actionable, but its clock reads as a time and so attracts a
+        // time-shaped goal: a run aimed at setting a 6 AM alarm tapped the
+        // status clock twice instead of the picker.
+        let belowStatusBar = recognised.filter { element in
+            element.point.y > Double(image.height) * 0.05
+        }
+
+        return mergeRowValues(belowStatusBar, width: Double(image.width))
             .enumerated()
             .map { index, element in
                 JevElement(

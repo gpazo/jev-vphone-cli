@@ -158,6 +158,38 @@ without check  →  1  tap "Airplane Mode"      → airplane OFF   ← wrong sta
 Without it the agent toggles the setting back off, then has to fix it — a real
 wrong-state excursion, an extra Jev call, and a side effect on Wi-Fi.
 
+## Where OCR runs out
+
+The alarm demo is the clearest case. `tests/AlarmDemoApp` stands in for the
+Clock app the Simulator does not ship, using a stock three-column wheel
+`DatePicker`.
+
+The agent gets most of the way: it opens the app, taps `+`, reaches the
+picker, and saves — a run produced five stored alarms, confirmed in the app's
+own preferences. What it does not do reliably is set a **specific** time.
+
+Three things defeat it, and all three are the same missing information:
+
+- **A wheel looks like a list of buttons.** OCR reports `7 8 9 10 11` as five
+  separate elements. Nothing says they are one control, and tapping a value on
+  a wheel does nothing at all — it must be dragged.
+- **Nothing says which column is which.** Hour, minute and AM/PM are three
+  wheels of bare numbers.
+- **Dragging is timing-sensitive.** A fast sweep is ignored as a flick. What
+  works is a hold, then a slow travel: measured, a 160ms sweep moved nothing
+  while a 250ms hold plus a 600ms sweep moved two rows.
+
+The action space gained `drag_up` / `drag_down` for this, operating on the
+chosen element, and the device constraints now say plainly that a vertical
+column of numbers is a wheel that must be dragged. That changed the model's
+behaviour from tapping to dragging — but not enough to land a specific time.
+
+**This is the ceiling, and it is worth being precise about why.** A semantic
+tree would report `UIPickerView`, its components, and the selected row of each
+— everything required, with nothing inferred. OCR supplies floating numbers
+and no indication they belong to one control. No amount of prompting recovers
+information the observation never carried.
+
 ## Untrusted screen content
 
 Element labels are whatever the running app put on screen, so an app or web page

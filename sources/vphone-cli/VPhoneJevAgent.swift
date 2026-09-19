@@ -11,6 +11,9 @@ import Foundation
 protocol JevActuator {
     func tap(at point: CGPoint) async throws
     func scroll(reveal: JevScrollDirection) async throws
+    /// Drag on one element, for controls that answer to dragging rather than
+    /// tapping — picker wheels, sliders, scrollable subviews.
+    func drag(at point: CGPoint, up: Bool) async throws
     func type(_ text: String) async throws
     func pressHome() async throws
     func launch(bundleId: String) async throws
@@ -630,6 +633,9 @@ final class VPhoneJevAgent {
             constraints.append(
                 "Each element sits where its *text* is, which is not always where the control is: a home screen icon is above its label, and tapping the label does nothing. Launching an app by identifier is more reliable than tapping its icon."
             )
+            constraints.append(
+                "Several numbers stacked in a vertical column — for example 7, 8, 9, 10 above one another — are a picker wheel, not a list of buttons. Tapping a value on a wheel does nothing at all; the wheel must be dragged, one step at a time, until the value you want is in the middle. A time picker has a separate wheel for the hour, the minutes and AM/PM, and each must be dragged on its own column."
+            )
         }
 
         return JevDevice(
@@ -670,6 +676,7 @@ final class VPhoneJevAgent {
 
     private enum Plan {
         case tap(JevElement)
+        case drag(JevElement, up: Bool)
         case scroll(JevScrollDirection)
         case type(String)
         case home
@@ -679,6 +686,7 @@ final class VPhoneJevAgent {
         var detail: String {
             switch self {
             case let .tap(element): "tap \"\(element.label)\""
+            case let .drag(element, up): "drag \"\(element.label)\" \(up ? "up" : "down")"
             case let .scroll(direction): direction == .below ? "scroll down" : "scroll up"
             case let .type(text): "type \"\(text)\""
             case .home: "press home"
@@ -729,6 +737,12 @@ final class VPhoneJevAgent {
             }
             return .tap(element)
 
+        case .dragUp, .dragDown:
+            guard let choice = response[JevQuestions.tapTarget]?.choice, choice != "none",
+                  let element = observation.element(id: choice)
+            else { return .wait }
+            return .drag(element, up: action == .dragUp)
+
         case .scrollDown:
             return .scroll(.below)
 
@@ -766,6 +780,7 @@ final class VPhoneJevAgent {
     private func execute(_ plan: Plan) async throws {
         switch plan {
         case let .tap(element): try await actuator.tap(at: element.point)
+        case let .drag(element, up): try await actuator.drag(at: element.point, up: up)
         case let .scroll(direction): try await actuator.scroll(reveal: direction)
         case let .type(text):
             if let typist {

@@ -178,6 +178,17 @@ struct JevSocketActuator: JevActuator {
         ])
     }
 
+    func drag(at point: CGPoint, up: Bool) async throws {
+        let distance = screen.height * 0.06
+        try client.send([
+            "t": "swipe",
+            "x1": point.x, "y1": point.y,
+            "x2": point.x, "y2": point.y + (up ? -distance : distance),
+            "ms": 250,
+            "screen": false,
+        ])
+    }
+
     func type(_ text: String) async throws {
         // "typetext", not "type": the latter only sets the guest clipboard,
         // so nothing would ever appear in the focused field.
@@ -206,6 +217,10 @@ final class JevDryRunActuator: JevActuator {
 
     func scroll(reveal direction: JevScrollDirection) async throws {
         performed.append("scroll(\(direction == .below ? "down" : "up"))")
+    }
+
+    func drag(at point: CGPoint, up: Bool) async throws {
+        performed.append("drag(\(Int(point.x)), \(Int(point.y)), \(up ? "up" : "down"))")
     }
 
     func type(_ text: String) async throws { performed.append("type(\(text))") }
