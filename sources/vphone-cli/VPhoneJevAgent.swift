@@ -123,6 +123,9 @@ final class VPhoneJevAgent {
     /// Reads observed device state, so "did it work" is answered by fact
     /// rather than by the model's reading of its own screenshot.
     var facts: (any JevFactProvider)?
+    /// Types by tapping the on-screen keyboard, where the target has no
+    /// working key-event channel. Falls back to the actuator when absent.
+    var typist: JevKeyboardTypist?
     /// Populated from `facts` each step; shown to the model separately from
     /// what the screen appears to say.
     private(set) var verifiedFacts: [String] = []
@@ -679,7 +682,12 @@ final class VPhoneJevAgent {
         switch plan {
         case let .tap(element): try await actuator.tap(at: element.point)
         case let .scroll(direction): try await actuator.scroll(reveal: direction)
-        case let .type(text): try await actuator.type(text)
+        case let .type(text):
+            if let typist {
+                try await typist.type(text)
+            } else {
+                try await actuator.type(text)
+            }
         case .home: try await actuator.pressHome()
         case let .launch(bundleId, _): try await actuator.launch(bundleId: bundleId)
         case .wait: break

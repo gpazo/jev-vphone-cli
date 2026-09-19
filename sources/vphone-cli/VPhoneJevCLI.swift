@@ -94,6 +94,7 @@ struct VPhoneJevCommand: ParsableCommand {
         let liveActuator: any JevActuator
         var apps: [(bundleId: String, name: String)] = []
         var factProvider: (any JevFactProvider)?
+        var keyboardTypist: JevKeyboardTypist?
 
         if let simulator {
             let simObserver = JevSimulatorObserver(udid: simulator)
@@ -101,6 +102,13 @@ struct VPhoneJevCommand: ParsableCommand {
             apps = simObserver.installedApps()
             liveActuator = JevSimulatorActuator(udid: simulator)
             factProvider = JevSimulatorFacts(udid: simulator)
+            // Synthetic key events do not reach the Simulator, so text is
+            // entered by tapping the keys the way a person would.
+            let simActuator = JevSimulatorActuator(udid: simulator)
+            keyboardTypist = JevKeyboardTypist(
+                observe: { try await simObserver.observe() },
+                tap: { point in try await simActuator.tap(at: point) }
+            )
         } else {
             let socketClient = VPhoneJevSocketClient(socketPath: socket)
             let socketObserver = JevSocketObserver(client: socketClient)
@@ -131,6 +139,7 @@ struct VPhoneJevCommand: ParsableCommand {
         )
         agent.installedApps = apps
         agent.facts = factProvider
+        agent.typist = keyboardTypist
         agent.confirm = Self.confirmOnStdin
         agent.onStep = { step in Self.print(step, verbose: verbose) }
 
