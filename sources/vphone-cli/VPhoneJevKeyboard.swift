@@ -158,8 +158,41 @@ struct JevKeyboardTypist {
 
     // MARK: Typing
 
-    /// Type `text`, switching planes and shifting as needed.
+    /// Type `text`, then check it actually arrived.
+    ///
+    /// Keystrokes land imperfectly — a first tap can arrive while the
+    /// keyboard is still animating in, and autocorrect rewrites things. A
+    /// real run produced "cweather" for "weather". So the field is read back
+    /// and, if it does not contain what was intended, cleared and retyped
+    /// once. Same principle as the tap retry: don't assume it worked, look.
     func type(_ text: String) async throws {
+        for attempt in 1 ... 2 {
+            try await enter(text)
+
+            let after = try await observe()
+            if Self.fieldContains(text, in: after) { return }
+            guard attempt == 1 else { break }
+
+            // Clear generously: there may be more in the field than we put
+            // there, and delete is a no-op on an empty field.
+            if let delete = Self.layout(from: after).delete {
+                for _ in 0 ..< (text.count + 6) { try await press(delete) }
+            }
+        }
+        throw TypingError.verificationFailed(expected: text)
+    }
+
+    /// Whether the intended text shows up anywhere on screen, which for a
+    /// focused field means it was entered.
+    static func fieldContains(_ text: String, in observation: JevObservation) -> Bool {
+        let wanted = text.lowercased()
+        return observation.elements.contains { element in
+            element.label.lowercased().contains(wanted)
+        }
+    }
+
+    /// One pass of key tapping, no verification.
+    private func enter(_ text: String) async throws {
         var observation = try await observe()
         var layout = Self.layout(from: observation)
         guard layout.isKeyboard else { throw TypingError.noKeyboard }
