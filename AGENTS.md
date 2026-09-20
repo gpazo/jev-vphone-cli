@@ -7,6 +7,7 @@ Virtual iPhone boot tool using Apple's Virtualization.framework with PCC researc
 - **Build:** `make build`
 - **Boot (GUI):** `make boot`
 - **Boot (DFU):** `make boot_dfu`
+- **Taking over this work?** Read [`docs/handoff.md`](docs/handoff.md) first — state, traps, and what is blocked.
 - **Jev control:** `make jev PROMPT="turn on airplane mode"` (needs `TYPESAFE_API_KEY`)
 - **Jev, no VM:** `make jev_fake PROMPT="..."` — runs against `tests/jev_fake_phone.py`
 - **All targets:** `make help`
