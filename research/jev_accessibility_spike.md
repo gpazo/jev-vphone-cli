@@ -157,6 +157,65 @@ Vision OCR         → JevObservation ─┘
 Every response carries `source`, so it is always visible which one ran. Landing
 the tree is a provider swap, not an agent rewrite.
 
+## Runbook
+
+Everything on the host side is built and compiling; what remains needs two
+things only the machine's owner can provide.
+
+### Blockers
+
+| | required | current |
+|---|---|---|
+| SIP / AMFI | disabled | **enabled** — `csrutil status`, no boot-args |
+| free disk | ~60–100 GB (IPSWs, extraction, VM disk) | **16 GB** |
+
+SIP is disabled from Recovery (⌘R at boot → Terminal → `csrutil disable`,
+plus `nvram boot-args=-arm64e_preview_abi amfi_get_out_of_my_way=1`), then
+reboot. Neither can be done from inside a running session.
+
+### Already prepared
+
+- `scripts/repos/trustcache` and `scripts/repos/insert_dylib` cloned
+- `vphoned_accessibility.m` written and compiling for `arm64 iphoneos`
+- `VPhoneControl.accessibilityProbe/Enable/Tree` wired, `ax_probe` exposed on
+  the automation socket, `JevAccessibilityProvider` consuming it
+
+### Sequence once unblocked
+
+```sh
+make setup_tools                  # brew deps, build toolchain, venv
+make fw_prepare                   # download + merge IPSWs  (the disk-hungry step)
+make fw_patch_jb                  # JB variant: needed for the injection fallback
+make vm_new && make cfw_install_jb
+make boot                         # VM window + automation socket
+
+make jev_probe                    # ← the spike: what the firmware exposes
+```
+
+Record `jev_probe` output in Findings below **before** trusting the tree, then:
+
+```sh
+make jev PROMPT="set an alarm for 6 AM"    # real Clock app, real AX tree
+```
+
+### Why this is the path
+
+Two routes to a semantic tree were closed by measurement, not assumption:
+
+- **iOS Simulator host AX** — the device screen is a single `AXGroup` with no
+  children, and both `AXManualAccessibility` and `AXEnhancedUserInterface`
+  are rejected (`-25205`, `-25208`). Simulator.app publishes only its own
+  macOS chrome.
+- **idb** — `idb-companion` is no longer in Homebrew; the project is
+  effectively unmaintained.
+
+XCUITest can reach the Simulator's tree, but each query needs a test-runner
+invocation measured in seconds, which is unusable in a per-step agent loop.
+
+The VM is also the only target with the **real Clock app** — the Simulator
+ships no `com.apple.mobiletimer` at all — and with a working key-event path
+for text entry (`VPhoneKeyHelper.typeString`).
+
 ## Findings
 
 > Not yet run — no VM exists in this checkout. Record probe output, firmware
