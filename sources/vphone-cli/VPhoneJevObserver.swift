@@ -265,7 +265,7 @@ struct JevOCRProvider: JevObservationProvider {
             element.point.y > Double(image.height) * 0.05
         }
 
-        return mergeRowValues(belowStatusBar, width: Double(image.width))
+        return mergeRowValues(collapsePickerWheels(belowStatusBar), width: Double(image.width))
             .enumerated()
             .map { index, element in
                 JevElement(
@@ -276,6 +276,83 @@ struct JevOCRProvider: JevObservationProvider {
                     point: element.point
                 )
             }
+    }
+
+    /// Collapse a picker wheel's visible values into the one control they are.
+    ///
+    /// OCR reports a wheel as separate numbers — `7 8 9 10 11` — with nothing
+    /// saying they belong together, so a model reasonably treats them as five
+    /// buttons and taps one, which on a wheel does nothing at all. The
+    /// structure is recoverable from geometry though: a wheel is short labels
+    /// sharing an x, evenly spaced down the screen, and the value sitting at
+    /// the column's centre is the selected one.
+    ///
+    /// Collapsing them yields what a semantic tree would have reported —
+    /// one element, its current value, and a point that lands on the right
+    /// column when dragged.
+    static func collapsePickerWheels(_ elements: [JevElement]) -> [JevElement] {
+        // Candidates are short: wheel values are numbers or AM/PM, never prose.
+        let isShort: (JevElement) -> Bool = { $0.label.count <= 3 && $0.role == nil }
+
+        var columns: [[JevElement]] = []
+        var remaining = elements.filter(isShort)
+        var others = elements.filter { !isShort($0) }
+
+        // Grouped by index, not by id: ids are assigned after this runs, so
+        // every element still carries "" and matching on it would collapse
+        // everything into the first column.
+        while let seed = remaining.first {
+            let column = remaining.filter { abs($0.point.x - seed.point.x) < 45 }
+            remaining = remaining.filter { abs($0.point.x - seed.point.x) >= 45 }
+
+            // Three values make a wheel; AM/PM only ever shows two, so it is
+            // admitted on the strength of what it says.
+            let isMeridiem = column.count == 2 && column.allSatisfy {
+                ["am", "pm"].contains($0.label.lowercased())
+            }
+            guard column.count >= 3 || isMeridiem else {
+                others.append(contentsOf: column)
+                continue
+            }
+            columns.append(column.sorted { $0.point.y < $1.point.y })
+        }
+
+        guard !columns.isEmpty else { return elements }
+
+        var collapsed = others
+        var wheelIndex = 0
+        columns.sort { ($0.first?.point.x ?? 0) < ($1.first?.point.x ?? 0) }
+        for column in columns {
+            // Regular spacing distinguishes a wheel from text that merely
+            // happens to line up.
+            let gaps = zip(column, column.dropFirst()).map { $1.point.y - $0.point.y }
+            let regular = column.count == 2
+                || (gaps.min().map { $0 > 0 } ?? false
+                    && (gaps.max()! / gaps.min()!) < 2.2)
+            guard regular else {
+                collapsed.append(contentsOf: column)
+                continue
+            }
+
+            // The wheel's selected value is the one at its centre.
+            let midY = (column.first!.point.y + column.last!.point.y) / 2
+            let selected = column.min { abs($0.point.y - midY) < abs($1.point.y - midY) }!
+
+            wheelIndex += 1
+            let position = columns.count == 1
+                ? "picker wheel"
+                : "picker wheel \(wheelIndex) of \(columns.count), left to right"
+            collapsed.append(
+                JevElement(
+                    id: selected.id,
+                    role: "picker wheel",
+                    label: position,
+                    value: "showing \(selected.label); drag this column to change it",
+                    point: selected.point
+                )
+            )
+        }
+        return collapsed.sorted { ($0.point.y, $0.point.x) < ($1.point.y, $1.point.x) }
     }
 
     /// Fold a settings row's value into its label.

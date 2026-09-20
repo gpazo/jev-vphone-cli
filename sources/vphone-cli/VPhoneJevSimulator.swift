@@ -274,7 +274,10 @@ struct JevSimulatorActuator: JevActuator {
         VPhoneJevSimulator.app()?.activate()
         try? await Task.sleep(nanoseconds: 120_000_000)
 
-        let distance = screen.height * 0.06
+        // One row, not two. A picker row is about 3.2% of screen height, and
+        // a longer drag overshoots a short wheel — AM/PM has only two values,
+        // so a two-row pull runs off the end and snaps back to where it was.
+        let distance = screen.height * 0.035
         let end = CGPoint(x: point.x, y: point.y + (up ? -distance : distance))
 
         // Timing matters more than distance here. A picker wheel ignores a

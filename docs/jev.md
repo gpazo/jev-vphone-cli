@@ -164,31 +164,40 @@ The alarm demo is the clearest case. `tests/AlarmDemoApp` stands in for the
 Clock app the Simulator does not ship, using a stock three-column wheel
 `DatePicker`.
 
-The agent gets most of the way: it opens the app, taps `+`, reaches the
-picker, and saves — a run produced five stored alarms, confirmed in the app's
-own preferences. What it does not do reliably is set a **specific** time.
+**Structure lost by OCR can partly be rebuilt from geometry.** A wheel is short
+labels sharing an x at regular spacing, and the value at the column's centre is
+the selected one — so `collapsePickerWheels` folds five floating numbers into
+one element: *"picker wheel 1 of 3, left to right, showing 9; drag this column
+to change it"*. That is close to what a semantic tree would have reported, and
+it changed the agent's behaviour completely:
 
-Three things defeat it, and all three are the same missing information:
+| | before | after |
+|---|---|---|
+| what it did | tapped picker values at random | dragged specific wheels |
+| confidence | 0.34–0.53 | 0.77–0.95 |
+| result | arbitrary times saved | within one or two rows of the target |
 
-- **A wheel looks like a list of buttons.** OCR reports `7 8 9 10 11` as five
-  separate elements. Nothing says they are one control, and tapping a value on
-  a wheel does nothing at all — it must be dragged.
-- **Nothing says which column is which.** Hour, minute and AM/PM are three
-  wheels of bare numbers.
-- **Dragging is timing-sensitive.** A fast sweep is ignored as a flick. What
-  works is a hold, then a slow travel: measured, a 160ms sweep moved nothing
-  while a 250ms hold plus a 600ms sweep moved two rows.
+Drag timing had to be measured rather than guessed. A wheel ignores a fast
+sweep as a flick: a 160ms drag moved nothing, while a 250ms hold followed by a
+600ms travel moved two rows. Distance matters too — a two-row pull runs off the
+end of the two-value AM/PM wheel and snaps back, so drags are sized to one row.
 
-The action space gained `drag_up` / `drag_down` for this, operating on the
-chosen element, and the device constraints now say plainly that a vertical
-column of numbers is a wheel that must be dragged. That changed the model's
-behaviour from tapping to dragging — but not enough to land a specific time.
+**It still does not land a specific time reliably.** Best run reached 7:00 PM
+against a 6:00 AM goal: the hour wheel stepped 9 → 8 → 7 correctly, but the
+AM/PM wheel was dragged down and then back up, undoing itself. Two causes, both
+real:
+
+- OCR reads the light-grey AM/PM labels intermittently, so the wheel sometimes
+  vanishes from the observation entirely and its current value is unknown.
+- With the value missing, there is nothing to tell the model the wheel is
+  already correct, so it keeps adjusting.
 
 **This is the ceiling, and it is worth being precise about why.** A semantic
-tree would report `UIPickerView`, its components, and the selected row of each
-— everything required, with nothing inferred. OCR supplies floating numbers
-and no indication they belong to one control. No amount of prompting recovers
-information the observation never carried.
+tree reports the picker, its components and each selected row — with nothing
+inferred and nothing dependent on whether grey-on-white text happened to
+survive OCR. Geometry recovers a useful amount of that, and high-confidence
+behaviour follows immediately when it does. What it cannot recover is a value
+the pixels did not legibly contain.
 
 ## Untrusted screen content
 
