@@ -167,7 +167,24 @@ things only the machine's owner can provide.
 | | required | current |
 |---|---|---|
 | SIP / AMFI | disabled | **enabled** — `csrutil status`, no boot-args |
-| free disk | ~60–100 GB (IPSWs, extraction, VM disk) | **16 GB** |
+| free disk | ~40 GB — see breakdown | **16 GB** |
+
+Measured rather than guessed, because an earlier estimate of 60-100 GB was
+wrong on two counts — it treated the VM disk as preallocated when `vm_create.sh`
+makes it sparse (`dd ... count=0 seek=$BYTES`, so it consumes only what iOS
+writes), and it assumed both IPSWs were large when cloudOS is under a gigabyte:
+
+| | size |
+|---|---|
+| iPhone IPSW (`iPhone17,3_26.1_23B85`) | 10.0 GiB |
+| cloudOS IPSW | 0.9 GiB |
+| extracted trees | ~12 GiB — `extract()` unzips to a cache and the archive is kept |
+| merged / patched output | ~12 GiB |
+| VM disk, sparse, once iOS is installed | ~8-12 GiB |
+
+`DISK_SIZE=64` is nominal. `make vm_new DISK_SIZE=32` halves the ceiling
+without changing what is actually consumed, and deleting `ipsws/` after the
+CFW install reclaims the cached archives.
 
 SIP is disabled from Recovery (⌘R at boot → Terminal → `csrutil disable`,
 plus `nvram boot-args=-arm64e_preview_abi amfi_get_out_of_my_way=1`), then
