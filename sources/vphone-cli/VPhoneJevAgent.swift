@@ -129,7 +129,7 @@ final class VPhoneJevAgent {
     // MARK: Dependencies
 
     private let goal: String
-    private let client: VPhoneJevClient
+    private let decider: any JevDecider
     private let provider: any JevObservationProvider
     private let actuator: any JevActuator
     private let policy: Policy
@@ -159,14 +159,14 @@ final class VPhoneJevAgent {
 
     init(
         goal: String,
-        client: VPhoneJevClient,
+        decider: any JevDecider,
         provider: any JevObservationProvider,
         actuator: any JevActuator,
         policy: Policy = .default,
         mode: Mode = .live
     ) {
         self.goal = goal
-        self.client = client
+        self.decider = decider
         self.provider = provider
         self.actuator = actuator
         self.policy = policy
@@ -227,53 +227,34 @@ final class VPhoneJevAgent {
                 verifiedFacts: verifiedFacts.isEmpty ? nil : verifiedFacts
             )
 
-            // A failed request ends the run cleanly rather than throwing out
-            // of it — the caller still gets the steps and cost so far.
-            let response: JevResponse
-            do {
-                response = try await client.ask(
-                    state: state,
-                    questions: JevQuestions.build(
-                        observation: observation,
-                        apps: installedApps,
-                        textCandidates: textCandidates,
-                        hasVerifiedFacts: !verifiedFacts.isEmpty
-                    )
-                )
-            } catch {
-                return .stopped(reason: "Jev request failed: \(error)", steps: index)
+            // The one thing that differs between the real policy and the
+            // ablation baseline. Everything after this is identical.
+            let decision = await decider.decide(
+                observation: observation,
+                state: state,
+                apps: installedApps,
+                textCandidates: textCandidates
+            )
+            if let failure = decision.failure {
+                return .stopped(reason: failure, steps: index)
             }
-            totalInputTokens += response.usage?.inputTokens ?? 0
+            totalInputTokens += decision.inputTokens
 
-            let doneP = response[JevQuestions.done]?.noul ?? 0
-            let blockedP = response[JevQuestions.blocked]?.noul ?? 0
-            let riskyP = response[JevQuestions.risky]?.noul ?? 0
-
-            let offeredActions = JevQuestions.availableActions(
-                observation: observation, apps: installedApps, textCandidates: textCandidates
-            ).map(\.rawValue)
-
-            guard let actionAnswer = response[JevQuestions.action] else {
-                return .stopped(reason: "Jev returned no action answer", steps: index)
-            }
-            if let failure = actionAnswer.validated(against: offeredActions) {
-                return .stopped(reason: "unusable action answer — \(failure)", steps: index)
-            }
-            guard let raw = actionAnswer.choice, let action = JevAction(rawValue: raw) else {
-                return .stopped(reason: "Jev returned no usable action", steps: index)
-            }
-
-            let confidence = actionAnswer.confidenceOrZero
+            let action = decision.action
+            let confidence = decision.confidence
+            let doneP = decision.done
+            let blockedP = decision.blocked
+            let riskyP = decision.risky
 
             // ── Stopping conditions, checked before anything is executed ──
 
             if doneP >= policy.done {
-                report(index, action, confidence, "goal already satisfied", doneP, blockedP, riskyP, false, response)
+                report(index, action, confidence, "goal already satisfied", doneP, blockedP, riskyP, false, decision.inputTokens)
                 return .achieved(steps: index)
             }
 
             if blockedP >= policy.blocked {
-                report(index, action, confidence, "needs a human decision", doneP, blockedP, riskyP, false, response)
+                report(index, action, confidence, "needs a human decision", doneP, blockedP, riskyP, false, decision.inputTokens)
                 return .stopped(
                     reason: "screen requires a human decision (blocked \(pct(blockedP)))",
                     steps: index
@@ -281,7 +262,7 @@ final class VPhoneJevAgent {
             }
 
             if action == .finish {
-                report(index, action, confidence, "Jev chose to stop", doneP, blockedP, riskyP, false, response)
+                report(index, action, confidence, "Jev chose to stop", doneP, blockedP, riskyP, false, decision.inputTokens)
                 return doneP >= policy.finishAccepted
                     ? .achieved(steps: index)
                     : .stopped(reason: "Jev stopped without the goal being met", steps: index)
@@ -292,7 +273,7 @@ final class VPhoneJevAgent {
             if action == .scrollDown || action == .scrollUp {
                 consecutiveScrolls += 1
                 if consecutiveScrolls > policy.maxConsecutiveScrolls {
-                    report(index, action, confidence, "scrolling without progress", doneP, blockedP, riskyP, false, response)
+                    report(index, action, confidence, "scrolling without progress", doneP, blockedP, riskyP, false, decision.inputTokens)
                     return .stopped(
                         reason: "scrolled \(consecutiveScrolls) times in a row without finding anything",
                         steps: index
@@ -321,7 +302,7 @@ final class VPhoneJevAgent {
 
             let plan: Plan
             do {
-                plan = try resolve(action: action, response: response, observation: observation,
+                plan = try resolve(action: action, decision: decision, observation: observation,
                                    textCandidates: textCandidates)
             } catch let error as PlanError {
                 return .stopped(reason: error.description, steps: index)
@@ -333,7 +314,7 @@ final class VPhoneJevAgent {
             // the action is possible at all, which is a different question
             // and one code can often answer from the observation.
             if let refusal = infeasible(plan) {
-                report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, response)
+                report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
                 return .stopped(reason: refusal, steps: index)
             }
 
@@ -342,7 +323,7 @@ final class VPhoneJevAgent {
             if confidence < policy.stopBelowConfidence,
                riskyP >= policy.confirmUncertainAboveRisk
             {
-                report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, response)
+                report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
                 return .stopped(
                     reason: "confidence \(pct(confidence)) too low to act on \(plan.detail)",
                     steps: index
@@ -366,14 +347,14 @@ final class VPhoneJevAgent {
             // so every further step would re-decide the same screen and
             // eventually trip stuck detection.
             if mode == .dryRun {
-                report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, response)
+                report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
                 return .stopped(reason: "dry run — would \(plan.detail)", steps: index)
             }
 
             if needsConfirmation, mode == .live {
                 let approved = await confirm("\(plan.detail) — \(reason). Proceed?")
                 guard approved else {
-                    report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, response)
+                    report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
                     return .stopped(reason: "declined: \(plan.detail)", steps: index)
                 }
             }
@@ -388,7 +369,7 @@ final class VPhoneJevAgent {
                 case let .stale(reason):
                     // The screen moved on between the judgment and the touch.
                     // Acting now would act on something Jev never saw.
-                    report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, response)
+                    report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
                     history.append(
                         JevHistoryEntry(
                             action: "skipped \(plan.detail) — \(reason)",
@@ -413,7 +394,7 @@ final class VPhoneJevAgent {
                 try await execute(executable)
             }
 
-            report(index, action, confidence, detail, doneP, blockedP, riskyP, true, response)
+            report(index, action, confidence, detail, doneP, blockedP, riskyP, true, decision.inputTokens)
             history.append(JevHistoryEntry(action: detail, changedScreen: nil))
 
             try? await Task.sleep(nanoseconds: UInt64(policy.settleMilliseconds) * 1_000_000)
@@ -704,7 +685,7 @@ final class VPhoneJevAgent {
     /// speculative branches that this step's action actually needs.
     private func resolve(
         action: JevAction,
-        response: JevResponse,
+        decision: JevStepDecision,
         observation: JevObservation,
         textCandidates: [String]
     ) throws -> Plan {
@@ -713,7 +694,7 @@ final class VPhoneJevAgent {
             // No target usually means the screen is mid-transition rather
             // than a dead end, so wait and look again. The step budget and
             // stuck detection bound how long that can go on.
-            guard let choice = response[JevQuestions.tapTarget]?.choice, choice != "none" else {
+            guard let choice = decision.targetId, choice != "none" else {
                 return .wait
             }
             guard let element = observation.element(id: choice) else {
@@ -738,7 +719,7 @@ final class VPhoneJevAgent {
             return .tap(element)
 
         case .dragUp, .dragDown:
-            guard let choice = response[JevQuestions.tapTarget]?.choice, choice != "none",
+            guard let choice = decision.targetId, choice != "none",
                   let element = observation.element(id: choice)
             else { return .wait }
             return .drag(element, up: action == .dragUp)
@@ -750,7 +731,7 @@ final class VPhoneJevAgent {
             return .scroll(.above)
 
         case .typeText:
-            guard let choice = response[JevQuestions.textSpan]?.choice, choice != "none" else {
+            guard let choice = decision.textId, choice != "none" else {
                 throw PlanError(description: "Jev chose to type but selected no text")
             }
             let index = Int(choice.dropFirst()) ?? 0
@@ -763,7 +744,7 @@ final class VPhoneJevAgent {
             return .home
 
         case .openApp:
-            guard let bundleId = response[JevQuestions.app]?.choice, bundleId != "none" else {
+            guard let bundleId = decision.appId, bundleId != "none" else {
                 throw PlanError(description: "Jev chose to open an app but selected none")
             }
             let name = installedApps.first { $0.bundleId == bundleId }?.name ?? bundleId
@@ -799,7 +780,7 @@ final class VPhoneJevAgent {
     private func report(
         _ index: Int, _ action: JevAction, _ confidence: Double, _ detail: String,
         _ done: Double, _ blocked: Double, _ risky: Double, _ executed: Bool,
-        _ response: JevResponse
+        _ tokens: Int
     ) {
         onStep(
             Step(
@@ -811,7 +792,7 @@ final class VPhoneJevAgent {
                 blocked: blocked,
                 risky: risky,
                 executed: executed,
-                inputTokens: response.usage?.inputTokens ?? 0
+                inputTokens: tokens
             )
         )
     }

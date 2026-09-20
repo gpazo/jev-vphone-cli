@@ -55,6 +55,13 @@ struct VPhoneJevCommand: ParsableCommand {
     @Flag(name: .shortAndLong, help: "Print the full state sent to Jev each step.")
     var verbose = false
 
+    @Flag(
+        help: """
+        Ablation: run the identical loop with the judgment replaced by label         matching and no model calls. Everything else — observation, gates,         freshness checks, actuation — is unchanged, so a difference in outcome         is attributable to the judgment alone.
+        """
+    )
+    var baseline = false
+
     // MARK: Run
 
     func run() throws {
@@ -88,7 +95,9 @@ struct VPhoneJevCommand: ParsableCommand {
 
     @MainActor
     private func execute() async throws {
-        let client = try VPhoneJevClient(apiKey: apiKey, model: model)
+        let decider: any JevDecider = baseline
+            ? JevBaselineDecider(goal: goal)
+            : JevModelDecider(client: try VPhoneJevClient(apiKey: apiKey, model: model))
 
         let observer: any JevObservationProvider
         let liveActuator: any JevActuator
@@ -131,7 +140,7 @@ struct VPhoneJevCommand: ParsableCommand {
 
         let agent = VPhoneJevAgent(
             goal: goal,
-            client: client,
+            decider: decider,
             provider: observer,
             actuator: actuator,
             policy: policy,
@@ -143,7 +152,7 @@ struct VPhoneJevCommand: ParsableCommand {
         agent.confirm = Self.confirmOnStdin
         agent.onStep = { step in Self.print(step, verbose: verbose) }
 
-        header(probe, appCount: agent.installedApps.count)
+        header(probe, appCount: agent.installedApps.count, policy: decider.name)
 
         let outcome = try await agent.run()
         footer(outcome, tokens: agent.totalInputTokens)
@@ -155,9 +164,10 @@ struct VPhoneJevCommand: ParsableCommand {
 
     // MARK: Output
 
-    private func header(_ observation: JevObservation, appCount: Int) {
+    private func header(_ observation: JevObservation, appCount: Int, policy: String) {
         Swift.print("")
         Swift.print("  goal      \(goal)")
+        Swift.print("  policy    \(policy)")
         Swift.print("  app       \(observation.foregroundApp)")
         Swift.print("  observing \(observation.source.rawValue) — \(observation.elements.count) elements, \(appCount) apps")
         Swift.print("  mode      \(dryRun ? "dry run (nothing will be touched)" : (yes ? "unattended" : "confirm when risky or uncertain"))")
