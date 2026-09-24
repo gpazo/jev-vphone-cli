@@ -14,8 +14,28 @@ struct JevElement: Equatable {
     let role: String?
     let label: String
     let value: String?
-    /// Tap point in screenshot pixel space (top-left origin).
-    let point: CGPoint
+    /// Tap point in the provider's input space (top-left origin): simulator
+    /// device points or VM pixels. Never sent to Jev.
+    var point: CGPoint
+    /// True only when the native adapter identifies a directly pressable control.
+    var nativePress = false
+    var context: String? = nil
+    /// A named action exposed by the live native element. The owner is checked
+    /// again at execution; native identifiers are deliberately not retained.
+    struct CustomAction: Equatable {
+        let name: String
+        let ownerLabel: String
+        let ownerValue: String?
+    }
+    var customAction: CustomAction? = nil
+    /// Native editable-field identity when iOS omits its label while empty.
+    /// Used by the simulator's freshness assertions, never inferred from value.
+    var placeholder: String? = nil
+    /// Experimental native reference, bound to one observation; never sent to Jev.
+    var nativeTargetToken: String? = nil
+    /// Options reported by the native control, not inferred from the goal.
+    /// nil means unavailable; an empty list means no supported selection.
+    var pickerOptions: [String]? = nil
 
     /// The projection sent to Jev.
     struct Described: Encodable {
@@ -23,16 +43,22 @@ struct JevElement: Equatable {
         let role: String?
         let label: String
         let value: String?
+        var context: String? = nil
+        var visibility: String? = nil
+        var pickerOptions: [String]? = nil
     }
 
     var described: Described {
-        Described(id: id, role: role, label: label, value: value)
+        Described(id: id, role: role, label: label, value: value, context: context, pickerOptions: pickerOptions)
     }
 
     /// Identity for stuck-detection: what the screen *is*, ignoring ids and
     /// sub-pixel jitter, so a redraw does not read as progress.
     var signature: String {
-        "\(role ?? "-")|\(label)|\(value ?? "-")"
+        "\(role ?? "-")|\(label)|\(value ?? "-")|\(context ?? "")"
+            + (customAction.map { "|named:\($0.name)|owner:\($0.ownerLabel)|\($0.ownerValue ?? "-")" } ?? "")
+            + (placeholder.map { "|placeholder:\($0)" } ?? "")
+            + (pickerOptions.map { "|options:\($0)" } ?? "")
     }
 }
 
@@ -46,12 +72,24 @@ struct JevObservation {
     }
 
     let foregroundApp: String
-    let elements: [JevElement]
+    var elements: [JevElement]
     /// The screen's rectangle in the same coordinate space as element points.
-    /// Zero-origin for the VM, where points are device pixels; the window's
-    /// rect for the Simulator, where they are host-global.
+    /// VM pixels or simulator device points, never host-window coordinates.
     let bounds: CGRect
     let source: Source
+    var documentTitle: String? = nil
+    var validatesTargetsAtExecution = false
+    var supportsPickerSelection = false
+    var progress: JevProgress.Snapshot? = nil
+    /// Read-only context outside the viewport or unreachable at hit test.
+    /// Never included in action tables, and not proof of visible completion.
+    var nearbyElements: [JevElement.Described] = []
+    /// Adapter layout evidence, including controls before transient hit filtering.
+    /// Kept separate from semantic identity and never sent as coordinates to Jev.
+    var layoutSignature: String? = nil
+    /// A native remote surface failed to provide its subtree. Local controls
+    /// may still be usable, but this cannot certify whole-screen completion.
+    var completenessIssue: String? = nil
 
     var screen: CGSize { bounds.size }
 
@@ -61,7 +99,10 @@ struct JevObservation {
 
     /// Order-independent fingerprint of the screen, used to detect a loop.
     var signature: String {
-        elements.map(\.signature).sorted().joined(separator: "\n")
+        let context = nearbyElements.map {
+            "\($0.role ?? "")|\($0.label)|\($0.value ?? "")|\($0.context ?? "")|\($0.visibility ?? "")"
+        }.sorted()
+        return ([documentTitle ?? ""] + elements.map(\.signature).sorted() + context).joined(separator: "\n")
     }
 }
 
@@ -75,6 +116,16 @@ protocol JevObservationProvider {
     /// Which source filled it is reported on the observation itself, not
     /// here — a provider may fall back per call.
     func observe() async throws -> JevObservation
+
+    /// Fresh app/document and candidate state for one selected control. The
+    /// result is used only for validation, never as the next model observation.
+    func observeForValidation(of target: JevElement) async throws -> JevObservation
+}
+
+extension JevObservationProvider {
+    func observeForValidation(of target: JevElement) async throws -> JevObservation {
+        try await observe()
+    }
 }
 
 // MARK: - Accessibility Provider

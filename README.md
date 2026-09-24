@@ -201,6 +201,22 @@ vphone-amfidont         # .build/vphone-cli.app/Contents/Resources/vphone-amfido
 
 Give the phone a goal in plain language and let [Jev](https://typesafe.ai) drive it:
 
+For a booted iOS Simulator (no VM setup or SIP changes needed):
+
+```sh
+make setup_jev                        # simulator accessibility + native input
+export TYPESAFE_API_KEY=...            # https://console.typesafe.ai/
+open -a Simulator
+make jev SIM=booted PROMPT="turn on Bold Text in Accessibility settings"
+make jev_demo SIM=booted              # also checks the device's Bold Text setting
+```
+
+This reads actual accessibility elements as text for Jev; it uses no OCR.
+`SIM=booted` requires exactly one booted device. Use
+`xcrun simctl list devices booted` to find a specific UDID for `SIM`. See [simulator setup and limits](./docs/jev.md#running-against-the-ios-simulator).
+
+For the vphone VM:
+
 ```sh
 export TYPESAFE_API_KEY=...            # https://console.typesafe.ai/
 make boot                              # one terminal

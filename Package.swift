@@ -60,5 +60,10 @@ let package = Package(
             dependencies: ["VPhoneCore"],
             path: "tests/VPhoneCoreTests"
         ),
+        .testTarget(
+            name: "JevTests",
+            dependencies: ["vphone-cli"],
+            path: "tests/JevTests"
+        ),
     ]
 )

@@ -9,6 +9,7 @@ Virtual iPhone boot tool using Apple's Virtualization.framework with PCC researc
 - **Boot (DFU):** `make boot_dfu`
 - **Taking over this work?** Read [`docs/handoff.md`](docs/handoff.md) first — state, traps, and what is blocked.
 - **Jev control:** `make jev PROMPT="turn on airplane mode"` (needs `TYPESAFE_API_KEY`)
+- **Jev, Simulator:** `make setup_jev`, then `make jev SIM=booted PROMPT="turn on Bold Text"` (semantic accessibility + native HID; no OCR)
 - **Jev, no VM:** `make jev_fake PROMPT="..."` — runs against `tests/jev_fake_phone.py`
 - **All targets:** `make help`
 - **Python venv:** `make setup_venv` (installs to `.venv/`, activate with `source .venv/bin/activate`)
@@ -142,9 +143,10 @@ research/                         # Detailed firmware/patch documentation
   request → code-side gating → one bounded action. Jev returns typed judgments only: it
   never generates text, never produces coordinates, and never decides whether to act —
   every threshold lives in `VPhoneJevAgent.Policy`. See `docs/jev.md`.
-- **Screen→text:** Jev accepts text only, so the screen is textified before it is judged.
-  Preferred source is the guest accessibility tree; Vision OCR is the fallback. Both fill
-  the same struct, so swapping them changes no agent code —
+- **Screen→text:** Jev reads semantic accessibility elements as text. The Simulator
+  uses AXe's direct accessibility bridge and native HID; the VM uses the guest tree.
+  Jev refuses an unavailable tree rather than falling back to OCR. Both fill
+  the same observation struct —
   see `research/jev_accessibility_spike.md`.
 
 ---

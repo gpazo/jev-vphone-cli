@@ -14,12 +14,21 @@ struct JevStepDecision {
     let done: Double
     let blocked: Double
     let risky: Double
+    var actionProbability: Double = 0
+    /// Keep the selected branch's uncertainty; unused speculative heads have
+    /// no bearing on execution. This is not a joint success probability.
+    var targetConfidence: Double?
+    var targetProbability: Double?
+    var executionConfidence: Double { min(confidence, targetConfidence ?? confidence) }
 
     /// Selections for the speculative branches, consumed only by whichever
     /// branch the action actually takes.
     var targetId: String?
     var appId: String?
     var textId: String?
+    var pickerValue: String?
+    var tapReadiness: String?
+    var readinessProbability: Double = 0
 
     var inputTokens: Int = 0
 
@@ -52,8 +61,12 @@ protocol JevDecider {
 @MainActor
 struct JevModelDecider: JevDecider {
     let client: VPhoneJevClient
+    var terminalChoiceCompletion = false
+    var validateForms = false
+    var compactRequests = false
 
-    var name: String { "jev (\(client.model))" }
+    var name: String { "jev (\(client.model))" + (validateForms ? " + experimental form validation" : "")
+        + (compactRequests ? " + experimental compact requests" : "") }
 
     func decide(
         observation: JevObservation,
@@ -61,12 +74,26 @@ struct JevModelDecider: JevDecider {
         apps: [(bundleId: String, name: String)],
         textCandidates: [String]
     ) async -> JevStepDecision {
-        let questions = JevQuestions.build(
+        var questions = JevQuestions.build(
             observation: observation,
             apps: apps,
             textCandidates: textCandidates,
-            hasVerifiedFacts: state.verifiedFacts != nil
+            hasVerifiedFacts: state.verifiedFacts != nil,
+            pickerValues: JevPickerValues.extract(from: state.goal),
+            includeStopUnable: terminalChoiceCompletion
         )
+
+        let space = JevActionSpace(observation: observation, apps: apps,
+            textCandidates: textCandidates, pickerValues: JevPickerValues.extract(from: state.goal),
+            includeStopUnable: terminalChoiceCompletion)
+        // Bound speculative work on dense pages. A selected target outside
+        // the batch receives the same judgment in one follow-up request.
+        if validateForms, let taps = space.targets[.tap] {
+            for id in taps.keys.sorted().prefix(24) {
+                questions[JevQuestions.readinessHead(id)] = JevQuestions.readiness(for: taps[id]!)
+            }
+        }
+        if compactRequests { questions = JevQuestions.compacted(questions) }
 
         let response: JevResponse
         do {
@@ -75,31 +102,53 @@ struct JevModelDecider: JevDecider {
             return .failed("Jev request failed: \(error)")
         }
 
-        let offered = JevQuestions.availableActions(
-            observation: observation, apps: apps, textCandidates: textCandidates
-        ).map(\.rawValue)
-
-        guard let answer = response[JevQuestions.action] else {
-            return .failed("Jev returned no action answer")
+        var decision = Self.decode(response, space: space)
+        if validateForms, decision.failure == nil, decision.action == .tap,
+           let id = decision.targetId, let target = space.targets[.tap]?[id] {
+            let head = JevQuestions.readinessHead(id)
+            var answer = response[head]
+            if questions[head] == nil {
+                do {
+                    let validation = try await client.ask(state: state, questions: [head: JevQuestions.readiness(for: target)])
+                    answer = validation[head]
+                    decision.inputTokens += validation.usage?.inputTokens ?? 0
+                } catch { return .failed("Form validation failed: \(error)") }
+            }
+            guard let answer, answer.validated(against: JevQuestions.readinessOptions) == nil else {
+                return .failed("Missing or invalid readiness judgment for the selected tap")
+            }
+            decision.tapReadiness = answer.choice
+            decision.readinessProbability = answer.topProbability
         }
-        if let invalid = answer.validated(against: offered) {
+        return decision
+    }
+
+    static func decode(_ response: JevResponse, space: JevActionSpace) -> JevStepDecision {
+        guard let answer = response[JevQuestions.action] else { return .failed("Jev returned no action answer") }
+        if let invalid = answer.validated(against: space.operations.map(\.rawValue)) {
             return .failed("unusable action answer — \(invalid)")
         }
-        guard let raw = answer.choice, let action = JevAction(rawValue: raw) else {
-            return .failed("Jev returned no usable action")
+        guard let raw = answer.choice, let action = JevAction(rawValue: raw) else { return .failed("Jev returned no usable action") }
+        var target: JevActionSpace.Target?
+        var targetAnswer: JevAnswer?
+        if let candidates = space.targets[action] {
+            let head = JevActionSpace.head(for: action)
+            guard let selected = response[head] else { return .failed("Jev returned no \(head) answer") }
+            if let invalid = selected.validated(against: candidates.keys) {
+                return .failed("unusable \(head) answer — \(invalid)")
+            }
+            target = selected.choice.flatMap { candidates[$0] }
+            targetAnswer = selected
         }
-
-        return JevStepDecision(
-            action: action,
-            confidence: answer.confidenceOrZero,
+        return JevStepDecision(action: action, confidence: answer.confidenceOrZero,
             done: response[JevQuestions.done]?.noul ?? 0,
             blocked: response[JevQuestions.blocked]?.noul ?? 0,
             risky: response[JevQuestions.risky]?.noul ?? 0,
-            targetId: response[JevQuestions.tapTarget]?.choice,
-            appId: response[JevQuestions.app]?.choice,
-            textId: response[JevQuestions.textSpan]?.choice,
-            inputTokens: response.usage?.inputTokens ?? 0
-        )
+            actionProbability: answer.topProbability,
+            targetConfidence: targetAnswer?.confidence, targetProbability: targetAnswer?.topProbability,
+            targetId: target?.elementID, appId: target?.appID, textId: target?.textID,
+            pickerValue: action == .setPickerValue ? target?.value : nil,
+            inputTokens: response.usage?.inputTokens ?? 0)
     }
 }
 

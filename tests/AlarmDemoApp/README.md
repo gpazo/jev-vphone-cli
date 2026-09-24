@@ -25,11 +25,39 @@ against the device rather than taken from the agent's own report:
 plutil -p "$(xcrun simctl get_app_container <udid> com.jevdemo.alarm data)/Library/Preferences/com.jevdemo.alarm.plist"
 ```
 
-`simctl spawn <udid> defaults read com.jevdemo.alarm` does *not* resolve this
-domain; read the plist directly.
+The host plist can lag behind Save. For immediate verification the guest helper
+reads the app's container-scoped defaults through cfprefsd. The recorder uses
+a separate process for this audit, compares UUIDs, and preserves existing entries.
 
-## Status
+## Timed demo
 
-The agent reliably opens the app, adds alarms and saves them — a run produced
-five stored alarms. It does **not** reliably set a *specific* time. See
-`docs/jev.md`, "Where OCR runs out".
+Verified with the app unchanged: five live Jev decisions reached **1.664–1.951
+seconds** from the home screen in a ready session. Startup takes about 2 seconds
+separately. Other repeats exceeded 2 seconds; malformed answers fail safely.
+
+Native accessibility exposes readable picker values (`9 o’clock`, `00 minutes`,
+`AM`). Jev chooses a wheel and a literal target from the goal. Code adjusts and
+verifies the wheel using native increment/decrement actions. No OCR is used.
+
+From the repository root, after installing the app:
+
+```sh
+make setup_jev
+make jev_session SIM=booted
+# After ready, enter: Add a new alarm for 6:00 AM in the Alarms app and save it.
+
+# Reproducible recording and independent verification:
+python3 tests/AlarmDemoApp/record.py --simulator booted --runs 1
+python3 tests/AlarmDemoApp/record.py --times 6AM 12PM 6PM
+```
+
+The recorder saves raw video, action timestamps, setup time, logs, before/after
+records, and the independent audit duration in `research/artifacts/jev-alarm/`.
+The ready-session timer includes the controller's UI-based completion check.
+Saved-state facts are not supplied to Jev; the independent audit is reported
+separately. Each successful run adds an alarm. The harness stops if either the
+saved record is wrong or the controller fails to report completion, and records
+both verdicts so these failures can be distinguished.
+
+This app stores alarm entries; it does not schedule notifications. It is not
+Apple Clock, which is absent from the installed simulator runtime.

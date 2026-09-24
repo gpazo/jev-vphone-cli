@@ -1,0 +1,125 @@
+{
+  "scope": "Frozen decision regressions, not task success. Labels fixed before compact replay; alternative acceptable bindings explicit.",
+  "cases": [
+    {
+      "id": "contacts-create",
+      "source": "research/artifacts/jev-contacts/20260923-075430/decisions/A46617B8-FFDF-48EC-B437-8F12CB70724F-request.json",
+      "allowed": {
+        "tap": [
+          "e42"
+        ]
+      },
+      "complete": false,
+      "rationale": "The goal requires a new contact; Add opens creation without changing an existing contact.",
+      "readiness": {}
+    },
+    {
+      "id": "contacts-fill",
+      "source": "research/artifacts/jev-contacts/20260923-075430/decisions/D6B64A1F-13B0-4748-9F40-5417928C6CBC-request.json",
+      "allowed": {
+        "type_text": [
+          "e58:t1",
+          "e59:t2",
+          "e60:t3"
+        ]
+      },
+      "complete": false,
+      "rationale": "All three fields are blank; each exact requested field/value pair is acceptable.",
+      "readiness": {}
+    },
+    {
+      "id": "contacts-save",
+      "source": "research/artifacts/jev-contacts/20260923-075430/decisions/9A5F9F3F-ED75-4EA9-AEEB-8A216AFF9752-request.json",
+      "allowed": {
+        "tap": [
+          "e46"
+        ]
+      },
+      "complete": false,
+      "rationale": "The three requested values are present; Done saves the new contact.",
+      "readiness": {
+        "readiness_e46": "ready"
+      }
+    },
+    {
+      "id": "contacts-complete",
+      "source": "research/artifacts/jev-contacts/20260923-075430/decisions/310B7522-6CCD-4B0A-AA46-AF784EF5EF81-request.json",
+      "allowed": {
+        "finish": []
+      },
+      "complete": true,
+      "rationale": "Post-save detail shows the new contact; independent SQLite audit confirmed new ID 27 and preserved prior contacts.",
+      "readiness": {}
+    },
+    {
+      "id": "calendar-initial-end",
+      "source": "research/artifacts/jev-calendar/20260923-074736/decisions/36157837-6362-4AF4-B81C-E07C76F4CDCB-request.json",
+      "allowed": {
+        "set_picker_value": [
+          "e61:v7"
+        ]
+      },
+      "complete": false,
+      "rationale": "Initial stage ends at 10:15 AM; open Ends wheel is 10:30 AM. Select 15, not values from the later stage.",
+      "readiness": {}
+    },
+    {
+      "id": "calendar-repair-start",
+      "source": "research/artifacts/jev-calendar/20260923-074736/decisions/BCC16903-3388-45D7-99F7-50C0A8809CAE-request.json",
+      "allowed": {
+        "set_picker_value": [
+          "e61:v9"
+        ]
+      },
+      "complete": false,
+      "rationale": "After initial save and reopening, requested start is 2:00 PM; visible Starts wheel is 2:30 PM. The original run wrongly chose 45.",
+      "readiness": {}
+    },
+    {
+      "id": "calendar-final-end",
+      "source": "research/artifacts/jev-calendar/20260923-074736/decisions/1C88DF60-6102-41AA-A65F-3A26A55B1288-request.json",
+      "allowed": {
+        "set_picker_value": [
+          "e66:v11"
+        ]
+      },
+      "complete": false,
+      "rationale": "Rescheduled start is 2 PM; Ends is 2 PM and must become 2:45 PM before save.",
+      "readiness": {}
+    },
+    {
+      "id": "calendar-complete",
+      "source": "research/artifacts/jev-calendar/20260923-074736/decisions/97FF1B36-4865-47C3-96A0-98A70974AEF1-request.json",
+      "allowed": {
+        "finish": []
+      },
+      "complete": true,
+      "rationale": "Same event saved at both requested time ranges; independent SQLite audit confirmed ID 137 and preserved prior events.",
+      "readiness": {}
+    },
+    {
+      "id": "safari-back",
+      "source": "research/artifacts/jev-safari/20260922-164220/decisions/BBCC25E5-6829-4150-B8DE-76921C406D7C-request.json",
+      "allowed": {
+        "tap": [
+          "e50"
+        ]
+      },
+      "complete": false,
+      "rationale": "First result is open; Back is the required next action. Loading the first result is not full completion.",
+      "readiness": {}
+    },
+    {
+      "id": "safari-second",
+      "source": "research/artifacts/jev-safari/20260922-164220/decisions/4830B63E-6EE5-4F36-B325-D83AE8B543F0-request.json",
+      "allowed": {
+        "tap": [
+          "e26"
+        ]
+      },
+      "complete": false,
+      "rationale": "After Back, independent native result order identifies Python documentation as the second organic result; do not revisit SQLite.",
+      "readiness": {}
+    }
+  ]
+}

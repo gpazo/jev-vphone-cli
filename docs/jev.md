@@ -35,17 +35,24 @@ The model supplies judgment. Code owns the workflow.
 
 ## The loop
 
+Use `--profile` to measure the complete Jev request separately from device
+facts, observation/settling, input/verification and startup. The simulator keeps
+its accessibility and native input services warm. The normal CLI does not inject
+app-specific saved-state facts; independent test recorders audit those separately. Semantic actions
+settle through observation without an additional post-action sleep; explicit
+waits still pause. See [the measured latency review](../research/jev_latency_review.md).
+
 ```
 observe ──→ one batched Jev request ──→ code decides ──→ act ──→ settle ──→ observe
    │                                          │
    │                                          └── stop: done / blocked / stuck /
    │                                                    low confidence / budget
-   └── accessibility tree, else OCR
+   └── accessibility tree (required)
 ```
 
-Each step sends **one** request containing every question at once. They are
+By default each step sends **one** request containing every question at once. They are
 answered in parallel and cannot see each other, so speculative questions cost
-tokens but not latency.
+tokens without serial model round trips; payload size and device work still affect latency.
 
 ## The questions
 
@@ -54,15 +61,45 @@ tokens but not latency.
 | `action` | Choice over *available* actions | always | always |
 | `tap_target` | Choice over tappable elements | when any exist | if `action == tap` |
 | `app` | Choice over installed bundle ids | when apps are known | if `action == open_app` |
-| `text_span` | Choice over spans code pulled from the goal | when candidates exist | if `action == type_text` |
-| `done` | Noul | always | always |
+| `type_text_target` | Choice over editable field + literal pairs | when candidates exist | if `action == type_text` |
+| `set_picker_value_target` | Choice over wheel + supported literal pairs | when supported | if `action == set_picker_value` |
+| `drag_up_target`, `drag_down_target` | Choice over adjustable controls | when any exist | for that drag operation |
+| `done` | Noul | always | default stopping gate; diagnostic in terminal-choice experiment |
 | `blocked` | Noul | always | always |
 | `risky` | Noul | always | always |
+| `readiness_<target ID>` | Choice: ready / mismatch / insufficient evidence / not applicable | `--validate-forms` experiment only | only for the selected tap |
 
-`tap_target`, `app` and `text_span` are **speculative** — asked before anyone
-knows which action wins, and discarded when the branch isn't taken. Each states
-its own premise ("Suppose the agent taps something this step…") because the
-questions cannot see each other's answers.
+Target heads are speculative: only the selected operation's head is consumed.
+Each candidate contains everything needed for that operation. A value and its
+field are not predicted independently. The action and consumed target answer
+are both validated; unused heads are discarded. Targets are bounded to 250
+per operation in deterministic element-ID order, so dense screens can omit
+controls. This is a request limit, not evidence that every app is supported.
+
+The **opt-in `--validate-forms` experiment** asks a readiness question bound to
+each of up to 24 tap targets in the existing batch. A chosen target outside that
+batch requires one additional request. It contains no Save-label dictionary or
+app-specific form schema. The selected answer must be a valid distribution and
+either `ready` or `not_applicable` with probability greater than 0.5, as set in
+`Policy.formReadiness`. Rejected choices return explicit `inputRejection`
+feedback on the next fresh observation; they never enter executed history.
+Normal stuck and step limits bound retries. A `ready` commit additionally
+requires a complete fresh **whole-form** observation with the same signature,
+followed by the existing native target check. A changed Save button is not the
+only possible invalidation: another field changing also cancels the approval.
+
+This remains experimental: the model can misclassify a commit or mistake missing
+evidence for a match. Replays found false refusals and unsupported approvals.
+The gate is not an independent outcome oracle. See
+[form-validation measurements](../research/jev_form_validation.md).
+
+Form-selection instructions apply independently to every operation/target head:
+verify this stage's values before saving, reveal an unavailable correction
+control, and reopen the identified item before editing it. Accessibility text
+from failed hit tests is retained as bounded, explicitly non-actionable context;
+it never enters target choices. That context participates in freshness signatures.
+The observed-action journal now retains field context (for example which row a
+time belongs to) alongside each recorded value.
 
 **Unavailable actions are not offered.** `JevQuestions.availableActions` drops
 `type_text` when nothing can accept text, `open_app` when no apps are known, and
@@ -75,13 +112,80 @@ jev-ultrafast, which builds one target head per operation.
 **Answers are validated before they are acted on.** A Choice must name an option
 that was actually offered, carry probabilities over exactly those options that
 sum to 1 (±0.02) and lie in [0,1], and its chosen option must be the most
-probable. Typed output guarantees the shape of the interface, not that the
+probable; confidence must be finite and in [0,1]. Typed output guarantees the shape of the interface, not that the
 contents are coherent; a response failing any of these ends the run rather than
 driving the phone.
+
+The consumed target's confidence and winning-option probability are retained
+and logged separately from the operation. Existing uncertainty gates use the
+lower of operation and selected-target confidence. This is a conservative
+gate input, not a calibrated joint success probability; speculative unused
+heads do not affect it. Benign uncertainty still does not require confirmation.
 
 The action vocabulary is named by intent rather than gesture — `scroll_down`, not
 `swipe_up` — because the model reasons about what should happen, and which
 gesture achieves it is code's business.
+
+## Native input and cross-app evaluation
+
+Completion rechecks observation freshness before accepting a terminal judgment.
+If that check finds a changed screen, its fresh complete observation is used
+for the next judgment without another immediate fetch. A later terminal
+judgment still requires a new verification read. Visible unresolved native
+remote subtrees prevent a completion claim, even if the reader's envelope does
+not report truncation. See the [observation follow-up](../research/jev_observation_followup.md)
+for the measured fast Settings task, failed experiments, and remaining limits.
+
+An experimental Simulator path, `JEV_SCOPED_VALIDATION=1`, retains native target
+references and checks the selected control and its ancestry before input instead
+of fetching another entire tree. It remains off by default: paired Contacts
+field entry improved, but Settings did not. Full model observations and fresh
+completion checks remain in place. See the [measured comparison and guard
+limitations](../research/jev_scoped_validation.md) before enabling it.
+
+The default retains the corroborated rule: `done >= 0.8`, or a Finish choice
+with `done >= 0.5`. An opt-in `--terminal-choice-completion` experiment uses
+Finish probability greater than 0.5 and adds `stop_unable` for explicit failure;
+its independent done estimate is diagnostic. The experiment is not promoted to
+default: live tests still exposed false success and false failure. The external
+evaluator remains necessary to detect wrong completion claims.
+
+The simulator exposes native accessibility text, context and values. Live hit
+checks remove covered controls; input revalidates the target and current
+app/document. Native press is used where supported; toolbar/container controls
+use the native physical-press translator. Editable fields use checked native
+value replacement. No OCR fallback is used. Snapshot and hit tests are separate
+reads, so transitions can still invalidate an observation. Document titles can
+lag navigation, and changed field text does not guarantee a search submission.
+
+Text replacement asserts the current field and verifies the value on the same
+native element handle, avoiding a second whole-tree read after the write.
+Native Back controls retain their navigation meaning alongside their visible
+destination labels. Large snapshots use the bounded 20,000-node budget on the
+first fetch; truncated trees are refused, and detected missing remote content
+blocks completion. See [measured input and browser results](../research/jev_input_followup.md).
+
+See [SafariSearch](../tests/SafariSearch/README.md) for the search → first result
+→ Back → second result test and [measured failures](../research/jev_safari_evaluation.md).
+The harness separately reports actual sequence completion and Jev's completion
+claim. The general controller has no Google-specific navigation script or
+alarm-specific completion oracle. Native picker options, when available, now
+filter impossible goal/value bindings and participate in target freshness.
+An unnamed inline editor keeps the text of its immediately preceding native row
+as explicit adjacency context, without asserting ownership or inventing targets.
+Wheel-centre taps are omitted; selection and adjustment remain. Arbitrary textual
+option selection and reliable page readiness/completion remain unfinished.
+The [picker evaluation](../research/jev_picker_options.md) records the first full
+Calendar pass and its failed repeat; no general reliability or speedup is claimed.
+
+`JevProgress` retains observed document visits, source/destination outcomes and
+form values across transitions. Both history representations derive from this
+journal. Candidate descriptions include prior execution evidence; the operation
+question includes the available target table. Nearby off-screen native controls
+are read-only context and require scrolling before becoming executable targets.
+Scroll readiness uses the unfiltered native layout as well as the semantic
+screen, so temporary hit-test rejection during motion does not look like a
+stable page with only browser chrome. See [the follow-up measurements](../research/jev_progress_review.md).
 
 ## Does Jev earn its place? — the ablation
 
@@ -129,16 +233,30 @@ All in `VPhoneJevAgent.Policy`, all evaluated in code:
 
 ```
 done.noul    >= 0.80                        → stop, success
-blocked.noul >= 0.60                        → stop, hand back to the human
+blocked.noul >= 0.45                        → stop, hand back to the human
 risky.noul   >= 0.50 && !--yes              → confirm before acting
-confidence   <  0.50                        → stop rather than guess
+confidence   <  0.50 && risky >= 0.15       → stop rather than guess
 confidence   <  0.85 && risky >= 0.15       → confirm
 screen unchanged 3 steps                    → stop, stuck
+same 2–4 action cycle twice, same next input → stop before a third cycle
 steps > 25                                  → stop, budget
 ```
 
-Two guards are pure code, never asked of the model: **stuck detection** (the
-model sees one screen at a time and cannot notice a loop) and the **step budget**.
+Here `confidence` is the lower of operation and selected-target confidence.
+Stuck detection, cycle detection and the step budget are code-owned guards.
+Cycles require matching executed actions, targets, app/document scope and
+complete before/after semantic screens. Different exits, ordinary Back then
+a different result, and changing visible values remain allowed. Passive reads,
+waits and rejected input add no transitions. This bounds repetition; it does
+not repair the task or establish completion. The journal is still the sole
+history store. See [the regression and paired experiment](../research/jev_control_bounds.md).
+
+`--compact-requests` is an off-by-default instruction-shortening experiment.
+It preserves the entire state, options, readiness questions and completion/risk
+questions. Frozen replay reduced median latency but regressed completed-event
+stopping; it has not earned promotion. The test-only replay harness compares
+production transformations against fixed expected decisions without controlling
+the phone. `--validate-forms` remains a separate experiment.
 
 Note `blocked` is checked before `risky`, so a screen that is both reports as
 blocked.
@@ -198,7 +316,7 @@ without check  →  1  tap "Airplane Mode"      → airplane OFF   ← wrong sta
 Without it the agent toggles the setting back off, then has to fix it — a real
 wrong-state excursion, an extra Jev call, and a side effect on Wi-Fi.
 
-## Where OCR runs out
+## Historical OCR findings (before the semantic simulator backend)
 
 The alarm demo is the clearest case. `tests/AlarmDemoApp` stands in for the
 Clock app the Simulator does not ship, using a stock three-column wheel
@@ -268,139 +386,97 @@ the claim can be re-checked when the attack or the model changes.
 
 ## Running against the iOS Simulator
 
-The vphone VM needs SIP and AMFI disabled, which an ordinary Mac does not have.
-Apple's iOS Simulator runs real iOS with no such requirement, so it is the
-target that can actually be exercised:
+The simulator path uses **the iOS accessibility tree only**. A persistent
+idb guest reader supplies native labels, roles, values and control frames.
+Jev receives only the text projection; code resolves selected element IDs.
+Buttons use native accessibility press with a fresh label assertion. Picker
+selection uses bounded native increments/decrements, checking each resulting
+value. Jev selects a literal from the goal in the same batched request; it
+never generates a value or coordinates. AXe remains available for HID actions.
+No screenshots or OCR are used for observation.
 
 ```sh
-xcrun simctl create jev-sim "iPhone 16 Pro" com.apple.CoreSimulator.SimRuntime.iOS-18-5
-xcrun simctl boot <udid> && open -a Simulator
-vphone-cli jev "open the Accessibility settings and turn on Bold Text" --simulator <udid> --yes
+make setup_jev                      # pinned AXe release in .tools/axe
+export TYPESAFE_API_KEY=...
+xcrun simctl list devices available
+xcrun simctl boot <udid>            # if not already booted
+open -a Simulator                  # optional: watch the device
+make jev SIM=<udid> PROMPT="turn on Bold Text in Accessibility settings"
+make jev_demo SIM=<udid>            # also asserts the device's Bold Text setting
+make jev_session SIM=<udid>         # initialize once; enter goals after ready
 ```
 
-Needs Accessibility permission for the host terminal — not to read the UI, but
-because synthetic `CGEvent`s are silently discarded without it.
+`SIM=booted` works when exactly one device is booted. Otherwise specify a UDID;
+selection is resolved once and shared by observation and input. Simulator window
+position, focus, scale, and host Accessibility permission are not part of this
+path. `JEV_AXE_PATH` can override the installed executable. AXe must retain its
+packaged frameworks beside it. These make targets build the debug client;
+private VM entitlements are not needed for simulator control.
 
-**The Simulator does not publish iOS UI to the host accessibility tree.**
-Probing `Simulator.app` returns its own macOS chrome — Volume, Sleep/Wake,
-Home, Rotate and 239 menu items — while the device screen is a single
-`AXGroup` with no children. So observation here is OCR. What the AX tree *is*
-good for is that opaque group's frame, which converts an OCR hit in device
-pixels into a host point worth clicking.
+`make jev_dry SIM=<udid> PROMPT="..."` previews one decision. Add
+`JEV_ARGS="--verbose"` to print the exact text state and probabilities for each
+step. `--max-steps` must be positive, and budget exhaustion exits unsuccessfully.
 
-### What works, and the wall it hits
+The default demo checks that the device reports Bold Text as `1`, independently
+of the agent's result. It prints the device reading even if the agent fails,
+and exits unsuccessfully if either the agent fails or verification fails.
+With a custom `PROMPT`, it prints the same reading but cannot verify arbitrary
+goals.
 
-Measured on iOS 18.5, goal "open the Accessibility settings and turn on Bold
-Text":
+### Measured on this checkout, 2026-09-20
 
+Xcode 26.6, iOS 18.5, AXe 1.8.0:
+
+- Direct tree read: 1.65 seconds cold, 0.296 and 0.286 seconds warm, including
+  executable startup. These are observation times, not complete Jev steps.
+- Bold Text off from Display & Text Size: one tap, then completion on step 2;
+  independent `defaults read` returned `0`.
+- Bold Text on from the home screen: Settings → Accessibility → Display & Text
+  Size → Bold Text, then completion on step 5; independent device reading `1`.
+- The semantic tree reports the switch's actual frame and on/off state. Duplicate
+  enclosing rows are removed from action choices; static text is not tappable.
+
+The earlier conclusion that the simulator could not expose a semantic tree was
+too broad. Simulator.app's macOS AX tree showed only window chrome, but the
+simulator's own accessibility server is reachable through
+[AXe](https://github.com/cameroncooke/AXe). See the corrected
+[spike findings](../research/jev_accessibility_spike.md).
+
+### Limits
+
+The iOS 18.5 simulator here has no Clock app or radio settings. The Alarms test
+app's 6 AM picker task reached 1.664–1.951 seconds in a ready session,
+with a new saved record independently checked. Startup takes about 2 seconds
+separately; slower runs and model refusals still occur. See the
+[latency review](../research/jev_latency_review.md). The app does not schedule
+notifications and is not Apple Clock. AXe typing supports
+printable US-keyboard ASCII; the client rejects unsupported text. A custom-drawn
+app still needs to expose useful accessibility elements. An unavailable or empty
+tree fails explicitly; Jev does not silently use OCR.
+
+## Observation and verification
+
+The simulator and VM fill the same `JevObservation` with semantic elements.
+Simulator coordinates are device points; VM coordinates are pixels. Neither is
+included in the text sent to Jev. Switch values are normalized to `on`/`off` and
+are included in freshness checks, so a changed control must be judged again.
+
+The VM client explicitly requests accessibility and rejects any other returned
+source. The VM guest implementation remains unverified, pending VM setup. Legacy
+OCR code remains available to other host-control clients, but is not a Jev
+fallback.
+
+`JevSimulatorFacts` also reports preference changes as separate device evidence.
+This supplements the tree; it does not verify arbitrary goals. External checks
+must still distinguish an agent's success judgment from the actual outcome.
+
+Regression checks, with no API key or live simulator:
+
+```sh
+make patcher_build
+swift test --filter SimulatorAccessibilityTests
+python3 tests/test_jev_commands.py
 ```
-→ 1  open Settings                conf 0.94
-→ 2  tap "Accessibility"          conf 0.97
-→ 3  tap "Display & Text Size"    conf 0.93
-→ 4  tap "Bold Text"              conf 0.97   ← lands on the label, not the switch
-```
-
-Navigation is solid: three correct drill-downs at 0.93–0.97. The run then
-stalls, and the reason is the central limitation of OCR observation:
-
-**OCR reports where the _text_ is, not where the _control_ is.** The offset
-differs by control type, and nothing in the text tells you which:
-
-| control | label position | control position |
-|---|---|---|
-| home screen icon | below the icon | ~130px **above** the label |
-| Settings switch row | left of the row | ~860px **right** of the label |
-
-Both were confirmed by hand: tapping "Settings" did nothing while tapping 130px
-higher opened it; tapping "Bold Text" did nothing while tapping the switch
-position turned it on.
-
-**Taps therefore find the control rather than assume it.** A wrong offset
-guessed up front fails silently, so instead the agent taps the label and lets
-the screen say whether it worked — retrying at the row's right edge, then above
-the label, stopping as soon as something changes. Each retry costs one
-observation and **no model call**, and only happens after a tap has provably
-done nothing, so the point being retried is one the screen just ignored. Step
-output names the retry that landed:
-
-```
-→ 5  tap "Bold Text" (row control)   conf 0.89
-```
-
-Where the label exactly names an installed app, a tap resolves to `open_app`
-instead, which has no coordinates to get wrong at all.
-
-This works, but it is compensation for missing information. A semantic tree
-reports the control's own frame and needs none of it — still the best argument
-for `research/jev_accessibility_spike.md`.
-
-### Two other findings from real hardware
-
-**The Simulator has no radios**, so Settings has no Airplane Mode, Wi-Fi,
-Bluetooth or Cellular pane. The first live run chased a goal the device could
-not satisfy and scrolled until the step budget bit. Worth knowing before
-writing test goals — and a reminder that `jev_fake_phone.py` models tasks the
-real target may not have.
-
-**Offering two equally good actions splits the probability.** Once `open_app`
-became available alongside `tap`, action confidence for "get to Settings" fell
-from ~0.8 to ~0.3 — not because the model was confused about what to do, but
-because two options were both right. TypeSafe's docs anticipate this: several
-acceptable alternatives spread probability, and low confidence need not
-invalidate a harmless choice. The confidence *stop* is therefore gated on risk,
-exactly like the confirm gate.
-
-## Observation
-
-Jev takes text only, so the screen must be textified first. Two providers fill
-the same `JevObservation`:
-
-- **Accessibility tree** (guest, preferred) — roles, labels, values, frames;
-  sees icon-only controls and toggle state. See
-  [`research/jev_accessibility_spike.md`](../research/jev_accessibility_spike.md).
-- **Vision OCR** (host, fallback) — rendered text only; cannot see an icon-only
-  button or tell whether a switch is on.
-
-Every response reports which one ran, and swapping between them changes no agent
-code.
-
-**State carries the device's own limits**, not just the screen — that typing
-needs a focused field, that there is no hardware back button, and crucially what
-the current observation *cannot* see. Under OCR the model is told that controls
-without text do not appear at all, so it does not read absence from the list as
-absence from the screen.
-
-**Observations wait for the screen to change.** Re-asking about a screen
-identical to the one just acted on buys the same judgment twice. After acting,
-the agent re-observes until the signature changes or ~2.5s passes — which is
-also faster than a fixed sleep, since most transitions finish well inside that.
-An unchanged screen is a legitimate outcome, so it proceeds and lets stuck
-detection decide.
-
-## Verification against the device
-
-Model judgment decides *what to do*; observed facts decide *what happened*.
-`JevState.verifiedFacts` carries the second half, and it is now populated.
-
-Rather than map goals to settings keys — which does not generalise — the agent
-snapshots device preferences before it starts and reports what **changed**
-since. That is goal agnostic and it is fact: *"Device setting
-EnhancedTextLegibilityEnabled changed from 0 to 1"* answers "did it work"
-without anyone having to anticipate the question. On the Simulator this reads
-through `simctl spawn defaults`; the VM equivalent is `settingsGet`.
-
-This closes a failure that is easy to miss: **the agent can succeed and not
-know it.** Measured on iOS 18.5 before facts were wired, goal "turn off Bold
-Text" — it flipped the toggle at step 6, navigated away at step 7, and gave up
-at step 8 with `done` at 0.31. It had done the job and could no longer see the
-evidence. With facts, the same task reports `done` 0.67 and stops correctly.
-
-Both directions verified independently on the device:
-
-| goal | steps | `defaults read` after |
-|---|---|---|
-| turn **on** Bold Text | 7 | `EnhancedTextLegibilityEnabled = 1` |
-| turn **off** Bold Text | 6 | `EnhancedTextLegibilityEnabled = 0` |
 
 ## Cost
 

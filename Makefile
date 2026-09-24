@@ -70,6 +70,9 @@ help:
 	@echo ""
 	@echo "Jev (natural-language control of a running VM):"
 	@echo "  make jev PROMPT=\"...\"        Drive the booted phone toward a goal"
+	@echo "    SIM=booted                Use the single booted iOS Simulator instead of a VM"
+	@echo "  make setup_jev              Install the simulator accessibility/input bridge"
+	@echo "  make jev_session SIM=booted  Keep a simulator session ready for successive goals"
 	@echo "    Options: JEV_ARGS=--yes    Skip confirmation on risky/uncertain steps"
 	@echo "             JEV_SOCKET=path   Automation socket (default: \$$(VM_DIR)/vphone.sock)"
 	@echo "  make jev_dry PROMPT=\"...\"    Show the next decision without touching the phone"
@@ -225,7 +228,9 @@ $(PATCHER_BINARY): $(SWIFT_SOURCES) Package.swift
 	@echo "=== Building vphone-cli patcher ($(GIT_HASH)) ==="
 	@echo '// Auto-generated — do not edit' > $(BUILD_INFO)
 	@echo 'enum VPhoneBuildInfo { static let commitHash = "$(GIT_HASH)" }' >> $(BUILD_INFO)
-	@set -o pipefail; swift build 2>&1 | tail -5
+	@mkdir -p .build
+	@swift build > .build/debug-build.log 2>&1 || { cat .build/debug-build.log; exit 1; }
+	@tail -5 .build/debug-build.log
 
 $(BINARY): $(SWIFT_SOURCES) Package.swift $(ENTITLEMENTS)
 	@echo "=== Building vphone-cli ($(GIT_HASH)) ==="
@@ -357,7 +362,10 @@ boot_dfu: build boot_binary_check
 # Jev — natural-language control of a running VM
 # ═══════════════════════════════════════════════════════════════════
 
-.PHONY: jev jev_dry jev_probe jev_fake jev_guards jev_demo
+.PHONY: jev jev_session jev_dry jev_probe jev_fake jev_guards jev_demo setup_jev
+
+setup_jev:
+	zsh "$(CURDIR)/scripts/setup_jev.sh"
 
 # The jev subcommand is a plain automation-socket client: it needs no
 # private entitlements, and signing the binary with them makes AMFI refuse
@@ -368,16 +376,21 @@ JEV_BINARY := $(PATCHER_BINARY)
 # reach the shell as one already-quoted argument.
 export PROMPT
 export MUTATE
+export SIM
 JEV_SOCKET ?= $(VM_DIR_ABS)/vphone.sock
 JEV_FAKE_SOCKET ?= /tmp/jev-fake-phone.sock
 
 jev: patcher_build
 	@if [ -z "$$PROMPT" ]; then echo "Usage: make jev PROMPT=\"turn on airplane mode\""; exit 1; fi
-	"$(CURDIR)/$(JEV_BINARY)" jev "$$PROMPT" --socket "$(JEV_SOCKET)" $(JEV_ARGS)
+	"$(CURDIR)/$(JEV_BINARY)" jev "$$PROMPT" $(if $(SIM),--simulator "$(SIM)",--socket "$(JEV_SOCKET)") $(JEV_ARGS)
+
+jev_session: patcher_build
+	@if [ -z "$$SIM" ]; then echo "Usage: make jev_session SIM=booted"; exit 1; fi
+	"$(CURDIR)/$(JEV_BINARY)" jev --session --simulator "$(SIM)" $(JEV_ARGS)
 
 jev_dry: patcher_build
 	@if [ -z "$$PROMPT" ]; then echo "Usage: make jev_dry PROMPT=\"turn on airplane mode\""; exit 1; fi
-	"$(CURDIR)/$(JEV_BINARY)" jev "$$PROMPT" --socket "$(JEV_SOCKET)" --dry-run --verbose $(JEV_ARGS)
+	"$(CURDIR)/$(JEV_BINARY)" jev "$$PROMPT" $(if $(SIM),--simulator "$(SIM)",--socket "$(JEV_SOCKET)") --dry-run --verbose $(JEV_ARGS)
 
 # Accessibility spike recon: reports what the guest firmware exposes.
 jev_probe:
@@ -403,18 +416,7 @@ jev_guards: patcher_build
 #   make jev_demo SIM=<udid>
 jev_demo: patcher_build
 	@if [ -z "$(SIM)" ]; then echo "Usage: make jev_demo SIM=<simulator-udid>"; echo "  xcrun simctl list devices booted"; exit 1; fi
-	@set -e; \
-	echo "── before ─────────────────────────────────────────────"; \
-	xcrun simctl spawn "$(SIM)" defaults read com.apple.Accessibility 2>/dev/null \
-		| grep -E "EnhancedTextLegibility|DarkenSystemColors" || echo "  (not set)"; \
-	echo; echo "── agent ──────────────────────────────────────────────"; \
-	xcrun simctl terminate "$(SIM)" com.apple.Preferences >/dev/null 2>&1 || true; \
-	sleep 2; \
-	"$(CURDIR)/$(JEV_BINARY)" jev "$(if $(PROMPT),$(PROMPT),turn on Bold Text in Accessibility settings)" \
-		--simulator "$(SIM)" --yes $(JEV_ARGS); \
-	echo "── after (ground truth from the device) ───────────────"; \
-	xcrun simctl spawn "$(SIM)" defaults read com.apple.Accessibility 2>/dev/null \
-		| grep -E "EnhancedTextLegibility|DarkenSystemColors" || echo "  (not set)"
+	@zsh "$(CURDIR)/scripts/jev_demo.sh" "$(CURDIR)/$(JEV_BINARY)" $(JEV_ARGS)
 
 # Drive the agent against the fake phone — no VM required.
 jev_fake: patcher_build

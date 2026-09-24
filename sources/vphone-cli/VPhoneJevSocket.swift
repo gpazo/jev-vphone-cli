@@ -98,14 +98,16 @@ struct VPhoneJevSocketClient: Sendable {
 
 /// Observes through a running VM's automation socket.
 ///
-/// Which provider actually ran — accessibility tree or OCR — is decided
-/// host-side and reported back in `source`.
+/// Requires the guest accessibility tree; Jev never silently uses OCR.
 @MainActor
 struct JevSocketObserver: JevObservationProvider {
     let client: VPhoneJevSocketClient
 
     func observe() async throws -> JevObservation {
-        let response = try client.send(["t": "observe", "screen": false])
+        let response = try client.send(["t": "observe", "screen": false, "require_accessibility": true])
+        guard response["source"] as? String == "accessibility" else {
+            throw VPhoneJevSocketClient.SocketError.remote("Jev requires the accessibility tree; the VM returned another source. Run make jev_probe to diagnose the guest. OCR is disabled.")
+        }
 
         let rawElements = response["elements"] as? [[String: Any]] ?? []
         let elements = rawElements.compactMap { raw -> JevElement? in
@@ -131,7 +133,7 @@ struct JevSocketObserver: JevObservationProvider {
                 width: screenInfo["width"] as? Int ?? 0,
                 height: screenInfo["height"] as? Int ?? 0
             ),
-            source: JevObservation.Source(rawValue: response["source"] as? String ?? "") ?? .ocr
+            source: .accessibility
         )
     }
 

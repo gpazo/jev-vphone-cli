@@ -51,6 +51,10 @@ struct JevQuestion: Encodable {
     static func score(_ instructions: String, _ levels: [String]) -> JevQuestion {
         JevQuestion(type: .score, instructions: instructions, options: nil, levels: levels)
     }
+
+    func replacingInstructions(_ instructions: String) -> JevQuestion {
+        JevQuestion(type: type, instructions: instructions, options: options, levels: levels)
+    }
 }
 
 // MARK: - Answers
@@ -84,6 +88,7 @@ struct JevAnswer: Decodable {
     /// means acting on something that is not a judgment at all, so the caller
     /// is told rather than left to act on it.
     func validated(against offered: some Collection<String>) -> ValidationFailure? {
+        guard type == "choice", let confidence, confidence.isFinite, (0...1).contains(confidence) else { return .invalidConfidence }
         guard let choice else { return .missingChoice }
         guard offered.contains(choice) else { return .unofferedOption(choice) }
         guard let probabilities else { return .missingProbabilities }
@@ -101,6 +106,7 @@ struct JevAnswer: Decodable {
     }
 
     enum ValidationFailure: CustomStringConvertible {
+        case invalidConfidence
         case missingChoice
         case unofferedOption(String)
         case missingProbabilities
@@ -111,6 +117,7 @@ struct JevAnswer: Decodable {
 
         var description: String {
             switch self {
+            case .invalidConfidence: "invalid choice type or confidence"
             case .missingChoice: "answer carried no choice"
             case let .unofferedOption(option): "chose \"\(option)\", which was not offered"
             case .missingProbabilities: "answer carried no probabilities"
@@ -196,6 +203,15 @@ struct VPhoneJevClient: Sendable {
     /// Ask a batch of questions about one state. All questions run in
     /// parallel, so speculative questions whose answers may go unused cost a
     /// round trip only in tokens, not latency.
+    func prepareConnection() async {
+        // Establish DNS/TLS without submitting a goal or inference request.
+        // HEAD may return 405; only transport readiness matters here.
+        var request = URLRequest(url: Self.endpoint)
+        request.httpMethod = "HEAD"
+        request.timeoutInterval = 3
+        _ = try? await session.data(for: request)
+    }
+
     func ask(state: some Encodable, questions: [String: JevQuestion]) async throws -> JevResponse {
         var request = URLRequest(url: Self.endpoint)
         request.httpMethod = "POST"
@@ -203,7 +219,17 @@ struct VPhoneJevClient: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(Request(model: model, state: state, questions: questions))
 
+        // Optional exact replay evidence. Persist payloads only, never headers
+        // or the API key. Tests enable this explicitly in their artifact folder.
+        let trace = ProcessInfo.processInfo.environment["JEV_TRACE_DIR"].map { URL(fileURLWithPath: $0) }
+        let traceID = UUID().uuidString
+        if let trace {
+            try FileManager.default.createDirectory(at: trace, withIntermediateDirectories: true)
+            try request.httpBody?.write(to: trace.appendingPathComponent(traceID + "-request.json"))
+        }
+
         let (data, response) = try await session.data(for: request)
+        if let trace { try data.write(to: trace.appendingPathComponent(traceID + "-response.json")) }
 
         if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
             throw ClientError.http(

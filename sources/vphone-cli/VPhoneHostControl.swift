@@ -445,6 +445,7 @@ class VPhoneHostControl {
         case "observe":
             let semaphore = DispatchSemaphore(value: 0)
             let result = ResultBox()
+            let requireAccessibility = json["require_accessibility"] as? Bool ?? false
 
             Task { @MainActor in
                 defer { semaphore.signal() }
@@ -453,7 +454,7 @@ class VPhoneHostControl {
                     return
                 }
                 do {
-                    let observation = try await controller.observe()
+                    let observation = try await controller.observe(requireAccessibility: requireAccessibility)
                     result.extra = [
                         "foreground": observation.foregroundApp,
                         "source": observation.source.rawValue,
@@ -571,7 +572,7 @@ class VPhoneHostControl {
     /// offscreen elements — and falls back to host-side OCR when the guest
     /// cannot supply one. Callers do not need to know which ran; the
     /// response carries `source` so it can be reported.
-    func observe() async throws -> JevObservation {
+    func observe(requireAccessibility: Bool = false) async throws -> JevObservation {
         let size = CGSize(width: screenWidth, height: screenHeight)
 
         if let control, control.isConnected {
@@ -579,6 +580,10 @@ class VPhoneHostControl {
             if let observation = try? await provider.observe(), !observation.elements.isEmpty {
                 return observation
             }
+        }
+
+        if requireAccessibility {
+            throw VPhoneJevSocketClient.SocketError.remote("The guest accessibility tree is unavailable; OCR is disabled for this request. Run make jev_probe.")
         }
 
         let provider = JevOCRProvider(

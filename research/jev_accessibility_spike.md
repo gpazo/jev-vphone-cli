@@ -1,5 +1,52 @@
 # Accessibility tree spike — turning the screen into text
 
+## Simulator result — 2026-09-20 (supersedes the old blocker conclusion)
+
+**Follow-up: full native snapshots are needed for wheels.** AXe's host
+translator reports `Slider` with numeric indices 5000/4980 for UIDatePicker.
+The idb 1.6.1 guest `SimulatorFrameworkBridge-iOS` exposes the native
+`XC_kAXXCAttributeValue` strings: `9 o’clock`, `00 minutes`, `AM`.
+`VPhoneJevAccessibilityBridge.swift` runs it once per Jev session and sends
+length-prefixed JSON over a private local socket. `snapshotTree: true` gets the
+whole tree in one call; `automationMode: true` exposes the full structure.
+Warm requests measured 35/33 ms, following a 508 ms first request. Reader
+startup and model decisions are outside those request timings. Automation mode
+is a simulator-wide setting asserted by the reader; no OCR fallback is used.
+
+The 6 AM demo passed with native AX reads plus explicit touch drags, with a
+new persisted alarm independently verified. See `docs/handoff.md` for the run
+artifact paths and timing. This does not validate the VM guest daemon below.
+
+
+The iOS Simulator semantic tree is now working through
+[AXe 1.8.0](https://github.com/cameroncooke/AXe/tree/v1.8.0), which uses the
+simulator accessibility bridge. The failed Simulator.app host AX probe below
+only tested the Mac window tree; it did not rule out direct simulator access.
+Likewise, a missing Homebrew idb formula was not evidence that its underlying
+accessibility API could not be used. No VM or per-step XCTest runner is required.
+
+Environment: Xcode 26.6 (17F113), booted iOS 18.5 device
+`C5D543C6-78C5-4F04-85DD-3484C02A33F2`. Three `axe describe-ui` reads of
+Display & Text Size took 1.650, 0.296, and 0.286 seconds wall time, including
+command startup. The returned tree included:
+
+- Application frame: 402 × 874 device points.
+- Bold Text: `CheckBox`, `AXValue: "1"`, frame x=315, y≈124.67, w=51, h=31.
+- Separate label and row nodes, which the provider keeps from becoming duplicate
+  switch action targets.
+
+`VPhoneJevSimulator.swift` now flattens this tree into semantic observations and
+uses AXe native HID for input in the same device-point coordinate space.
+Jev sees only ids, roles, labels, and values. Empty trees fail without OCR.
+The CLI resolves the device once and rejects ambiguous `SIM=booted` selection.
+
+Live verification: Bold Text off took one tap and completion at step 2, device
+preference `0`. From home, Bold Text on took four actions and completion at
+step 5, device preference `1`. The signed release and debug client must still
+be built through the make targets. The VM guest probe below remains unrun.
+
+## Original VM research (historical)
+
 ## Why this exists
 
 Jev takes **text only**. TypeSafe's docs are explicit: *"Jev accepts text only.
@@ -215,7 +262,7 @@ Record `jev_probe` output in Findings below **before** trusting the tree, then:
 make jev PROMPT="set an alarm for 6 AM"    # real Clock app, real AX tree
 ```
 
-### Why this is the path
+### Earlier route assessment — superseded by the simulator result above
 
 Two routes to a semantic tree were closed by measurement, not assumption:
 

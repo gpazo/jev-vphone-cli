@@ -26,6 +26,17 @@ enum JevScrollDirection {
     case above
 }
 
+/// Semantic actions assert the selected target again inside the guest.
+@MainActor
+protocol JevSemanticActuator: JevActuator {
+    func press(_ element: JevElement) async throws
+    func adjust(_ element: JevElement, up: Bool) async throws
+    func select(_ value: String, on element: JevElement) async throws
+    func fill(_ text: String, on element: JevElement) async throws
+}
+
+struct JevStaleTargetError: Error { let reason: String }
+
 // MARK: - Agent
 
 /// Drives the phone toward a natural-language goal, one bounded step at a
@@ -43,11 +54,19 @@ final class VPhoneJevAgent {
     /// guidance is that they must be evaluated against real data and real
     /// consequences — expect to move these after watching actual runs.
     struct Policy {
+        /// Reference-controller semantics: Finish is the typed terminal choice.
+        /// Require a majority and a fresh observation; keep the independent
+        /// done estimate diagnostic instead of combining contradictory heads.
+        var finishActionProbability = 0.5
+        /// Retains the previous dual judgment rule for measured ablations.
+        var corroborateCompletion = true
         /// Stop successfully at or above this `done` probability.
         var done = 0.8
         /// When Jev itself chooses to stop, the `done` probability at or above
         /// which that counts as success rather than giving up.
         var finishAccepted = 0.5
+        /// Experimental readiness must be a majority, including non-commit taps.
+        var formReadiness = 0.5
         /// Hand back to the human at or above this `blocked` probability.
         ///
         /// Measured on real permission dialogs, which sat at 0.54-0.59 — just
@@ -66,7 +85,7 @@ final class VPhoneJevAgent {
         var maxConsecutiveScrolls = 6
         /// Require confirmation at or above this `risky` probability.
         var risky = 0.5
-        /// Below this action confidence, stop rather than guess — but only
+        /// Below either selected operation or target confidence, stop rather than guess — but only
         /// when the step is consequential, see `confirmUncertainAboveRisk`.
         /// Two equally good ways to do the same safe thing split the
         /// probability between them, which is not a reason to give up.
@@ -82,6 +101,10 @@ final class VPhoneJevAgent {
         var maxSteps = 25
         /// Identical screens in a row before declaring the loop stuck.
         var stuckLimit = 3
+        /// Stop before replaying this many identical short cycles. A zero
+        /// maximum length disables only this guard for controlled ablation.
+        var maxCycleLength = 4
+        var cycleRepetitions = 2
         /// Fixed pause after acting, before the first re-observation.
         var settleMilliseconds = 400
         /// How long to keep re-observing while the screen still looks
@@ -118,6 +141,8 @@ final class VPhoneJevAgent {
         let index: Int
         let action: JevAction
         let actionConfidence: Double
+        let targetConfidence: Double?
+        let targetProbability: Double?
         let detail: String
         let done: Double
         let blocked: Double
@@ -150,8 +175,13 @@ final class VPhoneJevAgent {
     var confirm: @MainActor (String) async -> Bool = { _ in false }
     /// Called after every step, for live output.
     var onStep: @MainActor (Step) -> Void = { _ in }
+    /// Journal attempted input before dispatch, including actions that throw.
+    var onAttempt: @MainActor (Int, String) -> Void = { _, _ in }
+    /// The exact text evidence used for each decision, for verbose diagnostics.
+    var onState: @MainActor (JevState) -> Void = { _ in }
+    /// Non-overlapping wall-clock stages; decision includes the HTTP round trip.
+    var onTiming: @MainActor (Int, String, Double) -> Void = { _, _, _ in }
 
-    private var history: [JevHistoryEntry] = []
     private var recentSignatures: [String] = []
     private var interstitialsDismissed = 0
     private var consecutiveScrolls = 0
@@ -180,24 +210,46 @@ final class VPhoneJevAgent {
 
         // Baseline before anything is touched, so later readings describe
         // what this run changed rather than how the device happened to be.
+        var stageStart = ProcessInfo.processInfo.systemUptime
+        func mark(_ step: Int, _ stage: String) {
+            let now = ProcessInfo.processInfo.systemUptime
+            onTiming(step, stage, now - stageStart)
+            stageStart = now
+        }
         let baseline = await facts?.snapshot() ?? [:]
+        mark(0, "facts baseline")
 
         var lastSignature: String?
+        var lastDocument: (app: String, title: String)?
+        var progress = JevProgress()
+        var pendingLinkDocument: String?
+        var needsStableLayout = false
+        var pendingObservation: JevObservation?
+        var inputRejection: String?
 
         for index in 1 ... policy.maxSteps {
-            let observation: JevObservation
+            var observation: JevObservation
             do {
-                observation = try await observeSettled(after: lastSignature)
+                if let fresh = pendingObservation {
+                    // A failed completion check already obtained the next
+                    // complete observation. No input has happened since it;
+                    // judge it now instead of immediately fetching it again.
+                    observation = fresh
+                    pendingObservation = nil
+                } else {
+                    observation = try await observeSettled(after: lastSignature, previousDocument: lastDocument, linkFromDocument: pendingLinkDocument,
+                                                           requireStableLayout: needsStableLayout)
+                }
+                pendingLinkDocument = nil
+                needsStableLayout = false
+                mark(index, "observe and settle")
             } catch {
                 return .stopped(reason: "could not observe the phone: \(error)", steps: index - 1)
             }
-            if let previous = lastSignature, let last = history.indices.last {
-                history[last] = JevHistoryEntry(
-                    action: history[last].action,
-                    changedScreen: observation.signature != previous
-                )
-            }
             lastSignature = observation.signature
+            lastDocument = observation.documentTitle.map { (observation.foregroundApp, $0) }
+            progress.observe(observation)
+            observation.progress = progress.snapshot
 
             // Clear interstitials before asking anything: they are not a
             // judgment, and they otherwise eat a step each.
@@ -205,10 +257,8 @@ final class VPhoneJevAgent {
                let dismissal = interstitialDismissal(in: observation)
             {
                 interstitialsDismissed += 1
-                _ = await tapFindingControl(dismissal, in: observation)
-                history.append(
-                    JevHistoryEntry(action: "dismissed \"\(dismissal.label)\"", changedScreen: true)
-                )
+                _ = try await tapFindingControl(dismissal, in: observation)
+                progress.executed("dismiss \"\(dismissal.label)\"", target: dismissal, before: observation)
                 lastSignature = nil
                 continue
             }
@@ -216,6 +266,7 @@ final class VPhoneJevAgent {
             if let facts {
                 verifiedFacts = await facts.changes(since: baseline)
             }
+            mark(index, "facts")
 
             let state = JevState(
                 goal: goal,
@@ -223,9 +274,15 @@ final class VPhoneJevAgent {
                 foregroundApp: observation.foregroundApp,
                 observationSource: observation.source.rawValue,
                 elements: observation.elements.map(\.described),
-                history: history,
-                verifiedFacts: verifiedFacts.isEmpty ? nil : verifiedFacts
+                history: progress.snapshot.history,
+                verifiedFacts: verifiedFacts.isEmpty ? nil : verifiedFacts,
+                documentTitle: observation.documentTitle,
+                observedProgress: progress.snapshot,
+                nearbyElements: observation.nearbyElements.isEmpty ? nil : observation.nearbyElements,
+                inputRejection: inputRejection
             )
+            onState(state)
+            mark(index, "prepare state")
 
             // The one thing that differs between the real policy and the
             // ablation baseline. Everything after this is identical.
@@ -235,26 +292,59 @@ final class VPhoneJevAgent {
                 apps: installedApps,
                 textCandidates: textCandidates
             )
+            mark(index, "Jev decision")
             if let failure = decision.failure {
                 return .stopped(reason: failure, steps: index)
             }
             totalInputTokens += decision.inputTokens
 
             let action = decision.action
-            let confidence = decision.confidence
+            let confidence = decision.executionConfidence
             let doneP = decision.done
             let blockedP = decision.blocked
             let riskyP = decision.risky
+            let readinessAccepted = decision.tapReadiness.map {
+                ["ready", "not_applicable"].contains($0) && decision.readinessProbability > policy.formReadiness
+            } ?? true
 
             // ── Stopping conditions, checked before anything is executed ──
 
-            if doneP >= policy.done {
-                report(index, action, confidence, "goal already satisfied", doneP, blockedP, riskyP, false, decision.inputTokens)
+            // Completion can go stale during the model request just like a
+            // tap. Rejudge changed evidence; never certify the old screen.
+            if (policy.corroborateCompletion && doneP >= policy.done && readinessAccepted) || action == .finish || action == .stopUnable {
+                do {
+                    if let issue = observation.completenessIssue {
+                        return .stopped(reason: "cannot verify completion: \(issue)", steps: index)
+                    }
+                    let fresh = try await provider.observe()
+                    mark(index, "completion verification")
+                    if let issue = fresh.completenessIssue {
+                        return .stopped(reason: "cannot verify completion: \(issue)", steps: index)
+                    }
+                    if fresh.foregroundApp != observation.foregroundApp || fresh.signature != observation.signature {
+                        progress.observe(fresh)
+                        pendingObservation = fresh
+                        report(index, decision, "completion deferred: observation changed", false)
+                        lastSignature = nil
+                        continue
+                    }
+                } catch {
+                    return .stopped(reason: "could not verify completion observation: \(error)", steps: index)
+                }
+            }
+
+            if action == .stopUnable {
+                report(index, decision, "Jev found no supported way to continue", false)
+                return .stopped(reason: "goal remains incomplete; no supported progress was selected", steps: index)
+            }
+
+            if policy.corroborateCompletion && doneP >= policy.done && readinessAccepted {
+                report(index, decision, "goal already satisfied", false)
                 return .achieved(steps: index)
             }
 
             if blockedP >= policy.blocked {
-                report(index, action, confidence, "needs a human decision", doneP, blockedP, riskyP, false, decision.inputTokens)
+                report(index, decision, "needs a human decision", false)
                 return .stopped(
                     reason: "screen requires a human decision (blocked \(pct(blockedP)))",
                     steps: index
@@ -262,10 +352,13 @@ final class VPhoneJevAgent {
             }
 
             if action == .finish {
-                report(index, action, confidence, "Jev chose to stop", doneP, blockedP, riskyP, false, decision.inputTokens)
-                return doneP >= policy.finishAccepted
+                report(index, decision, "Jev selected Finish (probability \(pct(decision.actionProbability)))", false)
+                let accepted = policy.corroborateCompletion
+                    ? doneP >= policy.finishAccepted
+                    : decision.actionProbability > policy.finishActionProbability
+                return accepted
                     ? .achieved(steps: index)
-                    : .stopped(reason: "Jev stopped without the goal being met", steps: index)
+                    : .stopped(reason: "completion judgment did not meet the configured threshold", steps: index)
             }
 
             // Scrolling forever is its own failure: it changes the screen
@@ -273,7 +366,7 @@ final class VPhoneJevAgent {
             if action == .scrollDown || action == .scrollUp {
                 consecutiveScrolls += 1
                 if consecutiveScrolls > policy.maxConsecutiveScrolls {
-                    report(index, action, confidence, "scrolling without progress", doneP, blockedP, riskyP, false, decision.inputTokens)
+                    report(index, decision, "scrolling without progress", false)
                     return .stopped(
                         reason: "scrolled \(consecutiveScrolls) times in a row without finding anything",
                         steps: index
@@ -285,7 +378,7 @@ final class VPhoneJevAgent {
 
             // Stuck detection is code's job, not the model's: the model sees
             // one screen at a time and cannot reliably notice a loop.
-            recentSignatures.append(observation.signature)
+            recentSignatures.append(observation.foregroundApp + "|" + observation.signature)
             if recentSignatures.count > policy.stuckLimit {
                 recentSignatures.removeFirst()
             }
@@ -308,22 +401,37 @@ final class VPhoneJevAgent {
                 return .stopped(reason: error.description, steps: index)
             }
 
+            if let length = progress.repeatedCycleLength(repeating: plan.detail, target: plan.target, from: observation,
+                maxLength: policy.maxCycleLength, repetitions: policy.cycleRepetitions) {
+                let reason = "repeated \(length)-action cycle \(policy.cycleRepetitions) times; refusing to repeat \(plan.detail)"
+                report(index, decision, reason, false)
+                return .stopped(reason: reason, steps: index)
+            }
+
             // ── Can this even work? ──
             //
             // The gates below ask whether we *should* act. This asks whether
             // the action is possible at all, which is a different question
             // and one code can often answer from the observation.
             if let refusal = infeasible(plan) {
-                report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
+                report(index, decision, plan.detail, false)
                 return .stopped(reason: refusal, steps: index)
             }
 
             // ── Gates ──
 
+            if let readiness = decision.tapReadiness, !readinessAccepted {
+                inputRejection = "Did not execute \(plan.detail): form readiness \(readiness). Inspect or correct requested values before saving."
+                report(index, decision, inputRejection!, false)
+                lastSignature = nil // No input occurred; no transition to wait for.
+                if mode == .dryRun { return .stopped(reason: inputRejection!, steps: index) }
+                continue
+            }
+
             if confidence < policy.stopBelowConfidence,
                riskyP >= policy.confirmUncertainAboveRisk
             {
-                report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
+                report(index, decision, plan.detail, false)
                 return .stopped(
                     reason: "confidence \(pct(confidence)) too low to act on \(plan.detail)",
                     steps: index
@@ -347,57 +455,83 @@ final class VPhoneJevAgent {
             // so every further step would re-decide the same screen and
             // eventually trip stuck detection.
             if mode == .dryRun {
-                report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
+                report(index, decision, plan.detail, false)
                 return .stopped(reason: "dry run — would \(plan.detail)", steps: index)
             }
 
             if needsConfirmation, mode == .live {
                 let approved = await confirm("\(plan.detail) — \(reason). Proceed?")
                 guard approved else {
-                    report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
+                    report(index, decision, plan.detail, false)
                     return .stopped(reason: "declined: \(plan.detail)", steps: index)
                 }
             }
 
             // ── Act ──
+            mark(index, "gates")
 
             var executable = plan
             if case let .tap(element) = plan {
-                switch await revalidate(element) {
+                switch await revalidate(element, expected: observation, wholeForm: decision.tapReadiness == "ready") {
                 case let .fresh(current):
                     executable = .tap(current)
                 case let .stale(reason):
                     // The screen moved on between the judgment and the touch.
                     // Acting now would act on something Jev never saw.
-                    report(index, action, confidence, plan.detail, doneP, blockedP, riskyP, false, decision.inputTokens)
-                    history.append(
-                        JevHistoryEntry(
-                            action: "skipped \(plan.detail) — \(reason)",
-                            changedScreen: true
-                        )
-                    )
+                    report(index, decision, plan.detail, false)
                     lastSignature = nil
                     continue
                 }
             }
 
             var detail = plan.detail
-            if case let .tap(element) = executable {
-                let result = await tapFindingControl(element, in: observation)
-                if result.why != "label" {
-                    detail += " (\(result.why))"
+            onAttempt(index, detail)
+            do {
+                if case let .tap(element) = executable,
+                   let semantic = actuator as? any JevSemanticActuator {
+                    try await semantic.press(element)
+                    // The next observation is the readiness check; no fixed pause.
+                } else if case let .tap(element) = executable {
+                    let result = try await tapFindingControl(element, in: observation)
+                    if result.why != "label" {
+                        detail += " (\(result.why))"
+                    }
+                    // The retry already re-observed, so the next step's settle has
+                    // nothing left to wait for.
+                    lastSignature = nil
+                } else {
+                    try await execute(executable)
                 }
-                // The retry already re-observed, so the next step's settle has
-                // nothing left to wait for.
+            } catch let stale as JevStaleTargetError {
+                mark(index, "act and verify")
+                report(index, decision, "skipped \(plan.detail) — \(stale.reason)", false)
                 lastSignature = nil
-            } else {
-                try await execute(executable)
+                continue
+            } catch {
+                mark(index, "act and verify")
+                return .stopped(reason: "Input not confirmed for \(detail): \(error). Inspect before retrying.", steps: index)
             }
+            mark(index, "act and verify")
 
-            report(index, action, confidence, detail, doneP, blockedP, riskyP, true, decision.inputTokens)
-            history.append(JevHistoryEntry(action: detail, changedScreen: nil))
+            report(index, decision, detail, true)
+            if action != .wait {
+                inputRejection = nil
+                progress.executed(detail, target: executable.target, before: observation)
+            }
+            if case let .tap(element) = executable, element.role == "link" {
+                pendingLinkDocument = observation.documentTitle
+            }
+            needsStableLayout = [.scrollDown, .scrollUp, .dragUp, .dragDown].contains(action)
 
-            try? await Task.sleep(nanoseconds: UInt64(policy.settleMilliseconds) * 1_000_000)
+            // Semantic input already has a readiness check: taps re-observe
+            // above, other actions settle at the next loop. A second fixed
+            // pause adds latency without additional evidence. An explicit wait
+            // still waits, but must not demand a screen change afterward.
+            if action == .wait || observation.source != .accessibility {
+                try? await Task.sleep(nanoseconds: UInt64(policy.settleMilliseconds) * 1_000_000)
+            }
+            if action == .wait { lastSignature = nil }
+            mark(index, "post-action pause")
         }
 
 
@@ -459,11 +593,11 @@ final class VPhoneJevAgent {
     /// Returns whether anything changed.
     private func tapFindingControl(
         _ element: JevElement, in observation: JevObservation
-    ) async -> (changed: Bool, why: String) {
+    ) async throws -> (changed: Bool, why: String) {
         let before = observation.signature
 
         for candidate in tapCandidates(for: element, in: observation) {
-            try? await actuator.tap(at: candidate.point)
+            try await actuator.tap(at: candidate.point)
             try? await Task.sleep(nanoseconds: UInt64(policy.settleMilliseconds) * 1_000_000)
 
             // No observation means no evidence it failed; assume it landed
@@ -537,19 +671,22 @@ final class VPhoneJevAgent {
     /// signature includes the value, a switch that flipped between the
     /// decision and the touch correctly reads as stale rather than being
     /// toggled back.
-    private func revalidate(_ element: JevElement) async -> Freshness {
-        guard let observation = try? await provider.observe() else {
-            // Cannot check. Acting on a slightly old position beats refusing
-            // to act because an observation failed.
-            return .fresh(element)
+    private func revalidate(_ element: JevElement, expected: JevObservation, wholeForm: Bool = false) async -> Freshness {
+        guard let observation = try? await (wholeForm ? provider.observe() : provider.observeForValidation(of: element)) else {
+            return .stale("Cannot verify the selected target")
         }
 
-        if let current = observation.element(id: element.id),
-           current.signature == element.signature
-        {
-            return .fresh(current)
+        if wholeForm, expected.completenessIssue != nil || observation.completenessIssue != nil || observation.signature != expected.signature {
+            return .stale("Form evidence changed while choosing")
         }
-        if let current = observation.elements.first(where: { $0.signature == element.signature }) {
+
+        guard observation.foregroundApp == expected.foregroundApp,
+              observation.documentTitle == expected.documentTitle else {
+            return .stale("Application or document changed while choosing")
+        }
+
+        let matches = observation.elements.filter { $0.signature == element.signature }
+        if matches.count == 1, let current = matches.first {
             return .fresh(current)
         }
         return .stale("\"\(element.label)\" is no longer on screen as it was judged")
@@ -566,13 +703,48 @@ final class VPhoneJevAgent {
     /// An unchanged screen is a legitimate outcome — a control that does not
     /// re-render, a tap that missed — so this gives up and proceeds rather
     /// than looping, and lets stuck detection make the call.
-    private func observeSettled(after previous: String?) async throws -> JevObservation {
+    private func observeSettled(after previous: String?, previousDocument: (app: String, title: String)? = nil, linkFromDocument: String? = nil,
+                               requireStableLayout: Bool = false) async throws -> JevObservation {
         var observation = try await provider.observe()
         guard let previous else { return observation }
 
         let deadline = Date().addingTimeInterval(Double(policy.settleTimeoutMilliseconds) / 1000)
         while Date() < deadline {
+            // A document can temporarily disappear during navigation, including
+            // native Back/Forward controls. Keep that transition attached to
+            // its initiating action instead of asking Jev about empty chrome.
+            // Editable native UI (such as an address field) is already usable.
+            if let previousDocument, observation.foregroundApp == previousDocument.app,
+               observation.documentTitle == nil,
+               !observation.elements.contains(where: \.isTextInput) {
+                try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
+                observation = try await provider.observe()
+                continue
+            }
+            // A changed toolbar is not evidence that a link's destination has
+            // loaded. Keep reading under the existing bounded settle budget.
+            // Same-document links may consume that budget; no destination is
+            // invented when their title remains unchanged.
+            if let source = linkFromDocument, observation.documentTitle == nil || observation.documentTitle == source {
+                try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
+                observation = try await provider.observe()
+                continue
+            }
+            if requireStableLayout {
+                let layout = observation.layoutSignature ?? observation.signature
+                try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
+                let again = try await provider.observe()
+                if layout == (again.layoutSignature ?? again.signature), observation.signature == again.signature {
+                    return again
+                }
+                observation = again
+                continue
+            }
             if observation.signature != previous {
+                // Native input asserts its target in the guest at execution.
+                // A changed semantic screen can be judged immediately; if it
+                // moves during the request the action is skipped and rejudged.
+                if observation.validatesTargetsAtExecution { return observation }
                 // Changed — but a launching app shows a splash before its real
                 // first screen, and judging that produces "nothing to tap". So
                 // wait for the screen to stop changing, not merely to change.
@@ -597,11 +769,17 @@ final class VPhoneJevAgent {
     private func device(for observation: JevObservation) -> JevDevice {
         var constraints = [
             "Only the elements listed in `elements` can be acted on this step; anything not listed cannot be reached.",
-            "Text can only be typed into a field that is already focused. Tap the field before typing into it.",
+            "Text entry selects a field and literal text together; code focuses the field. Use an on-screen submit/Go/Search control afterward when required.",
             "There is no hardware back button. Go back by tapping an on-screen back control.",
             "Scrolling reveals content outside the visible area, so elements that are not listed may still exist above or below.",
         ]
+        if let issue = observation.completenessIssue {
+            constraints.append("\(issue). The screen is incomplete; completion cannot be verified from this observation.")
+        }
 
+        if observation.elements.contains(where: { $0.customAction != nil }) {
+            constraints.append("An accessibilityaction is a named action supplied by its native control. Select it with tap to invoke that action; its value is the current state of the owning control. It is not a physical tap at the control's centre.")
+        }
         switch observation.source {
         case .accessibility:
             constraints.append(
@@ -620,8 +798,8 @@ final class VPhoneJevAgent {
         }
 
         return JevDevice(
-            kind: "iPhone running iOS in a virtual machine, driven by synthetic touch events",
-            screen: "\(Int(observation.screen.width))x\(Int(observation.screen.height)) pixels",
+            kind: "iPhone running iOS, driven by programmatic touch events",
+            screen: "\(Int(observation.screen.width))x\(Int(observation.screen.height)) in the input coordinate space",
             constraints: constraints
         )
     }
@@ -658,18 +836,28 @@ final class VPhoneJevAgent {
     private enum Plan {
         case tap(JevElement)
         case drag(JevElement, up: Bool)
+        case select(JevElement, value: String)
         case scroll(JevScrollDirection)
-        case type(String)
+        case type(String, JevElement?)
         case home
         case launch(bundleId: String, name: String)
         case wait
 
+        var target: JevElement? {
+            switch self {
+            case let .tap(element), let .drag(element, _), let .select(element, _): element
+            case let .type(_, element): element
+            default: nil
+            }
+        }
+
         var detail: String {
             switch self {
-            case let .tap(element): "tap \"\(element.label)\""
+            case let .tap(element): (element.customAction == nil ? "tap" : "perform") + " \"\(element.label)\"" + (element.context.map { " [\($0)]" } ?? "")
             case let .drag(element, up): "drag \"\(element.label)\" \(up ? "up" : "down")"
+            case let .select(element, value): "set \"\(element.label)\" from \"\(element.value ?? "")\" to \"\(value)\"" + (element.context.map { " [\($0)]" } ?? "")
             case let .scroll(direction): direction == .below ? "scroll down" : "scroll up"
-            case let .type(text): "type \"\(text)\""
+            case let .type(text, element): "type \"\(text)\"" + (element.map { " in \"\($0.label)\"" } ?? "")
             case .home: "press home"
             case let .launch(_, name): "open \(name)"
             case .wait: "wait for the screen to settle"
@@ -724,6 +912,14 @@ final class VPhoneJevAgent {
             else { return .wait }
             return .drag(element, up: action == .dragUp)
 
+        case .setPickerValue:
+            guard let choice = decision.targetId, let element = observation.element(id: choice), element.role == "picker",
+                  let value = decision.pickerValue, JevPickerValues.extract(from: goal).contains(value),
+                  actuator is any JevSemanticActuator || mode == .dryRun else {
+                throw PlanError(description: "Invalid or unsupported picker selection")
+            }
+            return .select(element, value: value)
+
         case .scrollDown:
             return .scroll(.below)
 
@@ -738,7 +934,10 @@ final class VPhoneJevAgent {
             guard index >= 1, index <= textCandidates.count else {
                 throw PlanError(description: "Jev selected unknown text candidate \(choice)")
             }
-            return .type(textCandidates[index - 1])
+            guard let id = decision.targetId, let element = observation.element(id: id), element.isTextInput else {
+                throw PlanError(description: "Text entry requires an observed editable target")
+            }
+            return .type(textCandidates[index - 1], element)
 
         case .pressHome:
             return .home
@@ -753,18 +952,26 @@ final class VPhoneJevAgent {
         case .wait:
             return .wait
 
-        case .finish:
-            throw PlanError(description: "finish is handled before resolution")
+        case .finish, .stopUnable:
+            throw PlanError(description: "terminal decisions are handled before resolution")
         }
     }
 
     private func execute(_ plan: Plan) async throws {
         switch plan {
         case let .tap(element): try await actuator.tap(at: element.point)
-        case let .drag(element, up): try await actuator.drag(at: element.point, up: up)
+        case let .drag(element, up):
+            if let semantic = actuator as? any JevSemanticActuator {
+                try await semantic.adjust(element, up: up)
+            } else { try await actuator.drag(at: element.point, up: up) }
+        case let .select(element, value):
+            guard let semantic = actuator as? any JevSemanticActuator else { throw PlanError(description: "Picker selection unavailable") }
+            try await semantic.select(value, on: element)
         case let .scroll(direction): try await actuator.scroll(reveal: direction)
-        case let .type(text):
-            if let typist {
+        case let .type(text, element):
+            if let element, let semantic = actuator as? any JevSemanticActuator {
+                try await semantic.fill(text, on: element)
+            } else if let typist {
                 try await typist.type(text)
             } else {
                 try await actuator.type(text)
@@ -777,24 +984,12 @@ final class VPhoneJevAgent {
 
     // MARK: Reporting
 
-    private func report(
-        _ index: Int, _ action: JevAction, _ confidence: Double, _ detail: String,
-        _ done: Double, _ blocked: Double, _ risky: Double, _ executed: Bool,
-        _ tokens: Int
-    ) {
-        onStep(
-            Step(
-                index: index,
-                action: action,
-                actionConfidence: confidence,
-                detail: detail,
-                done: done,
-                blocked: blocked,
-                risky: risky,
-                executed: executed,
-                inputTokens: tokens
-            )
-        )
+    private func report(_ index: Int, _ decision: JevStepDecision, _ detail: String, _ executed: Bool) {
+        onStep(Step(index: index, action: decision.action,
+            actionConfidence: decision.confidence, targetConfidence: decision.targetConfidence,
+            targetProbability: decision.targetProbability, detail: detail,
+            done: decision.done, blocked: decision.blocked, risky: decision.risky,
+            executed: executed, inputTokens: decision.inputTokens))
     }
 
     private func pct(_ value: Double) -> String {
