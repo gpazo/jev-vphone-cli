@@ -16,10 +16,103 @@ make jev_fake PROMPT="turn on airplane mode"
 make jev_fake PROMPT="delete all my photos" SCREEN=photos    # watch the gate fire
 ```
 
+## Remote Clef experiment
+
+TypeSafe/Jev remains the default. To use Cloudflare's hosted Clef with the same
+accessibility observations, action bindings and controller thresholds:
+
+```sh
+# Set these in your local environment; do not commit credentials.
+export CLOUDFLARE_ACCOUNT_ID=your_account_id
+export CLOUDFLARE_API_TOKEN=your_workers_ai_token
+make jev SIM=booted PROMPT="open Settings" JEV_ARGS="--provider cloudflare --model clef"
+```
+
+`clef-flash` is also supported; omitting `--model` with Cloudflare selects
+`clef`. `CLOUDFLARE_AUTH_TOKEN` is accepted as a token alias. The account ID
+can instead be supplied with `--cloudflare-account-id`. The provider never
+uses the other provider's environment key. Cloudflare's REST result envelope
+is checked before any answer reaches the existing controller.
+
+This option does **not** enable screenshot-based phone control. The separate,
+read-only comparison includes both the ten existing semantic regression cases
+and three labeled screenshot probes. The paired run matched 27/30 expected
+decisions with Jev, 15/30 with Clef and 9/30 with Clef-flash. After reducing image
+size and regaining free access, both Clef models answered all nine questions
+across three frozen screenshots correctly in one pass. Keep Jev as the default;
+these probes do not establish general screenshot-only control.
+
+The separate `tests/DecisionReplay/vision_live.py` experiment supports at most
+one supervised visual tap per invocation. It uses screenshots, an optional
+coordinate grid, model-selected close-ups, fixed confidence gates, a pixel
+freshness check, and physical HID input. The existing shared $5 budget ledger
+is mandatory; reservations are internal accounting, not charges. Input is off
+unless `--execute` is supplied. Ordinary trial mode stops at terminal states;
+`--setup` is reserved for explicit menu/result-panel navigation. One Clef
+setup trial dismissed a victory panel and verified it visually. A subsequent
+new-board attempt was blocked by uncertain status. No autonomous game-play
+or general reliability claim follows from that one successful tap.
+
+The read-only `tests/DecisionReplay/compare_modalities.py` also compares a
+single Clef model receiving the exact captured Jev accessibility state, the
+paired screenshot, or both. On one completed board, combined input retained
+a visual clue absent from AX and raised completion confidence enough to pass
+the fixed diagnostic gate. All three modes were repeated three times; this
+does not establish general reliability. The combined request is confined to
+the research harness; the live provider option above still sends text only.
+Every comparison request uses the same existing budget ledger and stops on
+the first failure.
+
+See [remote Clef evaluation](../research/jev_clef_remote.md) for evidence,
+reproduction commands and limitations.
+
+### Conditional vision fallback
+
+The opt-in `--clef-vision-fallback` keeps TypeSafe/Jev as the first decision
+pass on accessibility text. Only a valid, nonterminal decision with selected
+action or target confidence below the policy's 0.85 confirmation threshold
+invokes Clef. Confident decisions do not capture or send a model screenshot.
+HTTP failures, blocked/risky judgments, and terminal original-goal status
+never trigger fallback. This experiment requires a Simulator and the existing
+Cloudflare environment credentials, repository Python environment, and budget
+ledger. Run it from the repository root with `JEV_TRACE_DIR` set.
+
+Clef receives the same state and question batch plus one contemporaneous
+small JPEG. With a planner proposal, it also classifies that proposal as still
+needed, already satisfied, unavailable, ambiguous, or unknown. The diagnosis
+retains its confidence and probability as unverified inference. Clef still
+selects only offered semantic actions. It cannot generate descriptions or
+coordinates. The wrapper preserves the larger blocked/risky judgments and
+checks the proposed action, selected targets, and their owners around inference.
+
+With `--planner`, a valid but still uncertain visual result can request fresh
+planning without input. The planner clears the old route and excludes the rejected
+action while its evidence is unchanged. Matching uses control and owner semantics,
+so transient IDs and ticking passive labels cannot bypass the exclusion. The
+planner retains prior exclusions and stops before another model cycle after three
+recoveries. Without a planner, unresolved vision stops. Weak local completion
+never completes the original goal. Every new proposal still passes Jev judgment,
+native binding, freshness, completion, and input checks. API failures, malformed
+answers, unsafe judgments, and stale evidence cannot become recovery.
+
+At most 12 fallback requests are allowed per goal; every request reserves the
+original shared $5 ledger before HTTP and stops on failure without retrying.
+The helper writes its screenshot, request, response, and budget report under
+the run's trace directory. This path is incompatible with `--baseline`,
+`--provider cloudflare`, and `--validate-forms`.
+
+The initial Minesweeper trial reached 87% with 18 native inputs and stopped on
+its first uncertain Clef result. A later frozen replay also produced a weak
+diagnosis, at 0.1105 confidence. The live recovery follow-up continued twice after
+uncertain Clef results, then stopped without retry on an HTTP 529 inference error.
+It placed two more flags but remained at 87%. Recovery is verified; stronger game
+reasoning and general reliability across apps are unproven. See the research
+results above for the full audit.
+
 ## What Jev is, and what it is not
 
 Jev is a **System One** model: it returns typed judgments and calibrated
-probabilities, not text. It does not write, plan, or explain. Ask it a question
+probabilities, not text. Jev itself does not write, plan, or explain. Ask it a question
 with a defined answer space and it tells you which answer, and how sure it is.
 
 That shapes the whole design:
@@ -32,6 +125,55 @@ That shapes the whole design:
   confidence; the thresholds that turn those into behaviour live in code.
 
 The model supplies judgment. Code owns the workflow.
+
+An optional external planner proposes an action contract. Jev independently judges each proposed action against the native observation. Code rejects disagreements and checks the target again before input. The planner never supplies screen coordinates or direct native input.
+
+### Use the optional planner
+
+The planner is off by default. The default budget is one native action per proposal. To test bounded inspection routes, set `--planner-max-actions` from 2 through 6:
+
+```sh
+export JEV_CODEX_BINARY=/absolute/path/to/codex
+export JEV_PLANNER_MODEL=gpt-6-astra
+export JEV_PLANNER_REASONING_EFFORT=high
+python3 tests/Donpa/record.py \
+  --simulator SIMULATOR_UUID --max-steps 900 --max-seconds 3600 \
+  --goal='Win Minesweeper. If the board is lost, stop without Retry or New game.' \
+  --jev-arg=--focused-requests \
+  --jev-arg=--remember-controls \
+  --jev-arg=--planner-max-actions=6 \
+  --jev-arg=--planner=/absolute/path/to/jev_codex_planner.py
+```
+
+The helper must be executable and support the existing Codex CLI authentication. Set `JEV_CODEX_BINARY` to select the executable. `JEV_PLANNER_MODEL` defaults to `gpt-6-astra`. `JEV_PLANNER_REASONING_EFFORT` accepts `low`, `medium`, `high`, or `xhigh` and defaults to `high`. The recorder records these selected settings and hashes explicitly named executables. It does not record credentials.
+
+The helper reads one JSON object from standard input and writes one JSON object to standard output. Protocol v2 requests contain `protocol_version`, `observation_id`, `offered_actions`, `goal`, `state`, `max_native_actions`, and an optional `previous_subgoal`. Each offered action contains `operation`, `target_key`, `description`, `owner_id`, and `owner_value`. Nullable fields are explicit JSON nulls.
+
+For an offered named action, a continuing response has this shape:
+
+```json
+{"status":"continue","subgoal":"Inspect the adjacent item.","reason":"More evidence is needed.","observation_id":"REQUEST_ID","steps":[{"operation":"tap","target_key":"e14:action3","expected_value":"CURRENT_OWNER_VALUE","after_value":null,"inspection":true,"subgoal":"Invoke Move right once."}]}
+```
+
+Every response has exactly these five fields. Each step has exactly the six shown fields. `observation_id` must match the request. The first expected value must match the offered target's current value. Operation and target must identify one offered binding. Terminal statuses `blocked` and `complete` require an empty `steps` array.
+
+Multiple steps are limited to named inspection actions on one uniquely identified owner. Intermediate values must come from that owner's recorded history and form an exact chain. An unknown outcome ends the route. Every step still requires a fresh Jev judgment, matching native evidence, and acknowledgment of the preceding input. A changed app, document, structure, owner value, or ambiguous target discards the route. Mutations remain single actions. The `inspection` classification is a model judgment, not proof of an app's behavior.
+
+A separate judgment in the same Jev request checks whether the original goal permits more input. Proposed subgoals cannot replace that check. Completion still requires fresh native evidence. Blocked, risky, target-confidence, and form-readiness gates remain active.
+
+Each run permits at most 512 planner requests, with a 60-second timeout per helper request. Planner latency is included in Jev decision and wall-clock timings. Planner tokens are reported separately from Jev tokens. Traces include `planner-<UUID>-request.json`, the response, stderr, and any contract rejection. Provider usage is in `planner-call-<UUID>/events.jsonl`; monotonic call duration is in `timing.json` beside it.
+
+See [the speed evaluation](../research/jev_simulator_speed.md) for measured results and limitations.
+
+`--remember-controls` keeps bounded verbatim owner values scoped by owner,
+application, and document. A same-owner new-game alias can therefore reuse
+the memory scope. There is no generic new-board identity detector. Current
+readings take precedence, and memory resets at each new top-level goal. Start
+a new goal after resetting an app surface; old values do not prove its contents.
+
+`--focused-requests` and `--remember-controls` remain opt-in. The default Jev
+loop is unchanged when the planner and those flags are absent. The planner path
+is AX-only and has no simulator access, game storage, OCR, or game solver.
 
 ## The loop
 

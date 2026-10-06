@@ -153,71 +153,90 @@ struct JevResponse: Decodable {
 
 // MARK: - Client
 
-/// Minimal client for the TypeSafe System One endpoint.
-///
-/// There is no official Swift SDK, so this speaks the documented HTTP
-/// contract directly: `POST /v1/systemone` with a bearer token, a `state`
-/// payload, and a map of questions answered in one round trip.
+/// System One client. Provider selection changes transport, not controller policy.
 struct VPhoneJevClient: Sendable {
-    static let endpoint = URL(string: "https://api.typesafe.ai/v1/systemone")!
     static let defaultModel = "jev-latest"
     static let apiKeyEnvVar = "TYPESAFE_API_KEY"
 
-    let apiKey: String
+    enum Provider: String, CaseIterable, Sendable {
+        case typesafe, cloudflare
+    }
+
+    let provider: Provider
     let model: String
+    let endpoint: URL
+    let cloudflareAccountID: String?
+    private let apiKey: String
     private let session: URLSession
 
+    var displayName: String { "\(provider.rawValue) (\(model))" }
+
     enum ClientError: Error, CustomStringConvertible {
-        case missingAPIKey
+        case configuration(String)
         case http(status: Int, body: String)
         case malformedResponse(String)
+        case rejected(String)
 
         var description: String {
             switch self {
-            case .missingAPIKey:
-                """
-                No TypeSafe API key. Set \(VPhoneJevClient.apiKeyEnvVar) in the environment, \
-                or pass --api-key. Keys come from https://console.typesafe.ai/
-                """
+            case let .configuration(detail): detail
             case let .http(status, body):
-                "TypeSafe API returned HTTP \(status): \(body)"
+                "Decision API returned HTTP \(status): \(body)"
             case let .malformedResponse(detail):
-                "Could not decode TypeSafe response: \(detail)"
+                "Could not decode decision response: \(detail)"
+            case let .rejected(detail): "Decision API rejected the request: \(detail)"
             }
         }
     }
 
     /// Reads the key from the environment when one is not supplied.
-    init(apiKey: String? = nil, model: String = defaultModel, timeout: TimeInterval = 30) throws {
-        let resolved = apiKey ?? ProcessInfo.processInfo.environment[Self.apiKeyEnvVar]
-        guard let resolved, !resolved.isEmpty else { throw ClientError.missingAPIKey }
-
+    init(apiKey: String? = nil, model: String? = nil, provider: Provider = .typesafe,
+         accountID: String? = nil, timeout: TimeInterval = 30,
+         environment: [String: String] = ProcessInfo.processInfo.environment) throws {
+        self.provider = provider
+        self.model = model ?? (provider == .typesafe ? Self.defaultModel : "clef")
+        let resolved: String?
+        switch provider {
+        case .typesafe:
+            cloudflareAccountID = nil
+            endpoint = URL(string: "https://api.typesafe.ai/v1/systemone")!
+            resolved = apiKey ?? environment[Self.apiKeyEnvVar]
+        case .cloudflare:
+            guard ["clef", "clef-flash"].contains(self.model) else {
+                throw ClientError.configuration("Cloudflare --model must be clef or clef-flash.")
+            }
+            guard let account = accountID ?? environment["CLOUDFLARE_ACCOUNT_ID"],
+                  account.range(of: "^[a-fA-F0-9]{32}$", options: .regularExpression) != nil else {
+                throw ClientError.configuration("Set CLOUDFLARE_ACCOUNT_ID or --cloudflare-account-id to your 32-character account ID.")
+            }
+            endpoint = URL(string: "https://api.cloudflare.com/client/v4/accounts/\(account)/ai/run/@cf/cloudflare/\(self.model)")!
+            cloudflareAccountID = account
+            // Never fall back to the TypeSafe key on a different provider.
+            resolved = apiKey ?? environment["CLOUDFLARE_API_TOKEN"] ?? environment["CLOUDFLARE_AUTH_TOKEN"]
+        }
+        guard let resolved, !resolved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            let variable = provider == .typesafe ? Self.apiKeyEnvVar : "CLOUDFLARE_API_TOKEN"
+            throw ClientError.configuration("Set \(variable) or --api-key for \(provider.rawValue).")
+        }
         self.apiKey = resolved
-        self.model = model
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeout
         session = URLSession(configuration: config)
     }
 
-    /// Ask a batch of questions about one state. All questions run in
-    /// parallel, so speculative questions whose answers may go unused cost a
-    /// round trip only in tokens, not latency.
+    /// Establish the provider connection without submitting an inference request.
     func prepareConnection() async {
         // Establish DNS/TLS without submitting a goal or inference request.
         // HEAD may return 405; only transport readiness matters here.
-        var request = URLRequest(url: Self.endpoint)
+        var request = URLRequest(url: endpoint)
         request.httpMethod = "HEAD"
         request.timeoutInterval = 3
         _ = try? await session.data(for: request)
     }
 
     func ask(state: some Encodable, questions: [String: JevQuestion]) async throws -> JevResponse {
-        var request = URLRequest(url: Self.endpoint)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(Request(model: model, state: state, questions: questions))
+        let request = try makeRequest(state: state, questions: questions)
 
         // Optional exact replay evidence. Persist payloads only, never headers
         // or the API key. Tests enable this explicitly in their artifact folder.
@@ -231,15 +250,43 @@ struct VPhoneJevClient: Sendable {
         let (data, response) = try await session.data(for: request)
         if let trace { try data.write(to: trace.appendingPathComponent(traceID + "-response.json")) }
 
-        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+        guard let http = response as? HTTPURLResponse else {
+            throw ClientError.malformedResponse("Missing HTTP response")
+        }
+        return try decodeResponse(data, status: http.statusCode)
+    }
+
+    func makeRequest(state: some Encodable, questions: [String: JevQuestion]) throws -> URLRequest {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(Request(model: model, state: state, questions: questions))
+        return request
+    }
+
+    func decodeResponse(_ data: Data, status: Int) throws -> JevResponse {
+        if !(200 ..< 300).contains(status) {
             throw ClientError.http(
-                status: http.statusCode,
-                body: String(data: data, encoding: .utf8) ?? "<non-UTF8 body>"
+                status: status,
+                body: (String(data: data.prefix(4096), encoding: .utf8) ?? "<non-UTF8 body>")
+                    .replacingOccurrences(of: apiKey, with: "<redacted>")
             )
         }
 
         do {
+            if provider == .cloudflare {
+                let envelope = try JSONDecoder().decode(CloudflareResponse.self, from: data)
+                guard envelope.success, envelope.errors.isEmpty else {
+                    throw ClientError.rejected(envelope.errors.map { "\($0.code): \($0.message)" }
+                        .joined(separator: "; ").replacingOccurrences(of: apiKey, with: "<redacted>"))
+                }
+                guard let result = envelope.result else { throw ClientError.malformedResponse("Missing Cloudflare result") }
+                return result
+            }
             return try JSONDecoder().decode(JevResponse.self, from: data)
+        } catch let error as ClientError {
+            throw error
         } catch {
             throw ClientError.malformedResponse("\(error)")
         }
@@ -251,5 +298,15 @@ struct VPhoneJevClient: Sendable {
         let model: String
         let state: S
         let questions: [String: JevQuestion]
+    }
+
+    private struct CloudflareResponse: Decodable {
+        struct APIError: Decodable {
+            let code: Int
+            let message: String
+        }
+        let success: Bool
+        let errors: [APIError]
+        let result: JevResponse?
     }
 }

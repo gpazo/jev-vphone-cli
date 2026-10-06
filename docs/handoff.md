@@ -12,6 +12,262 @@ action per step.
 
 `docs/jev.md` is the design document. This file is the state of play.
 
+## Remote Clef experiment — updated 2026-10-05
+
+**Latest follow-up, bounded generic recovery:** pstack-assisted implementation
+now lets a valid but still uncertain Clef result request a fresh plan without
+input. Jev still judges accessibility first. One conditional screenshot batch
+adds a fixed-choice local diagnosis, kept as unverified inference. The planner
+clears the previous route, excludes the unsupported action while evidence is
+unchanged, and retains semantic exclusions across changed IDs and A/B/A returns.
+After three consumed recoveries it stops before another planner/model cycle.
+API errors, malformed safety answers, stale views, and unsafe results cannot
+become recovery. Fresh recovery observations bypass automatic popup dismissal.
+
+Live continuation `research/artifacts/jev-donpa/20261005-202055/` ran 371.22 s,
+31 decisions, and 26 native inputs. It placed two additional flags and inspected
+23 distinct cells, but stayed at 87%. Two low-confidence Clef results produced
+no-input recovery and different freshly judged actions. The third Clef request
+returned HTTP 529 with `inference_error`, and the controller stopped immediately
+without retrying. No win/loss and no additional clearance. The independent audit
+is complete with no errors. The app remains active at 87%, counter 005, selected
+row 7, column 2. Do not feed the earlier retrospective board solution into play.
+
+129 Swift tests, 24 replay tests, 7 planner Python tests, and 16 Donpa tests pass.
+Two optional Swift export tests are skipped. The signed build and signature
+verification pass, but the release still receives SIGKILL before `--help` on this
+host. The live trial used the tested Simulator debug executable. No security
+settings changed.
+
+One frozen diagnostic replay plus the three live Clef calls used the existing
+free access and original ledger. All 30 prior ledger entries are unchanged.
+It now has **34 entries, $0.63 reserved, and $4.37 reservable** under the unchanged
+$5 cap. Three failed requests have unknown usage, including the new HTTP 529.
+Reservations are not charges. No billing, token, top-up, or scheduling changes.
+The one-time reminder remains paused. No further requests were made after 529.
+See [remote Clef evaluation](../research/jev_clef_remote.md) and the run's
+`recovery-audit.json`. Recovery works live; improved game performance and broad
+app reliability remain unproven.
+
+**Earlier live run — Jev first, Clef only on uncertainty:** the user's preferred
+routing is now opt-in as `--clef-vision-fallback` (TypeSafe/Jev + Simulator;
+run from the repo root with `JEV_TRACE_DIR`). The unchanged planner proposes
+native actions, Jev judges AX first, and Clef sees text + screenshot only
+below 0.85 selected action/target confidence. Errors, blocked/risky decisions,
+and terminal results do not trigger fallback. Existing action bindings and
+input safeguards remain; at most 12 fallbacks per goal use the original ledger.
+
+Fresh XS Drills run `research/artifacts/jev-donpa/20261005-193959/` reached
+87% on its opening, flagged one mine, and stopped after 211.38 seconds,
+22 Jev decisions and 18 native inputs. Exactly one Clef request occurred:
+Jev target confidence fell to 0.38, and Clef's local-subgoal finish confidence
+was only 0.1368. The existing guard stopped without another input. No win or
+loss; audit complete with no errors. The app remains on this active 87% board.
+At that checkpoint, the fallback was made to reject weak local finish choices
+directly, covered by an offline regression test. The newer bounded recovery
+behavior described above supersedes that immediate stop when a planner is present.
+
+At that checkpoint, 119 Swift, 24 DecisionReplay, and 16 Donpa tests passed.
+The original ledger had **$0.55 reserved and $4.45 reservable**, 30 entries. These
+are internal reservations, not charges. The one Clef call used free access;
+no billing or schedule changes. The signed release build/signature passed,
+but the VM-entitled binary exits 137 on this host; use the tested Simulator
+debug binary here. No security settings were changed. The old Donpa source
+checkout has unavailable Git metadata; recorder provenance retains the
+installed app bundle hash and records that source limitation explicitly.
+See [remote Clef evaluation](../research/jev_clef_remote.md).
+
+**Latest manual retry — October 5, 19:20 Pacific:** at the user's request,
+one fresh pass of text-only, image-only, and combined input completed on the
+same frozen paired screen. All three free-access requests returned HTTP 200.
+Answers and confidence scores exactly matched the earlier comparison.
+Combined input answered all three questions correctly and passed the status
+confidence gate in 0.942 s; image-only status confidence remained 0.2634.
+This confirms repeatability on this screen, not broader action reliability.
+No phone input or live-controller change. The original ledger now has 29
+entries, **$0.53 conservatively reserved and $4.47 reservable** under the $5
+local cap; reservations are not charges. The one-time reminder remains paused.
+Result: `research/artifacts/clef-multimodal/20261005/comparison-retry-20261006T022040Z.json`.
+
+**Scheduled follow-up retired:** a duplicate heartbeat arrived October 5 at
+17:05 Pacific (October 6 at 00:05 UTC), although the single scheduled attempt
+had already finished and the later manual comparison had succeeded. No new
+inference or phone input was performed. The existing reminder
+`resume-clef-vision-after-free-quota-reset` is now **PAUSED**, verified by the
+automation tool. The ledger remains at 26 entries, $0.47 conservatively
+reserved and $4.53 reservable. Do not restart a daily experiment from this
+completed one-time reminder.
+
+**Initial comparison — one Clef model with text + image:** the user clarified that
+“both” means Clef consuming the existing Jev accessibility state together with
+a screenshot. A read-only nine-request comparison used the same frozen board,
+three evidence modes, identical perception questions, and three repeats per
+mode. Text recognized completion confidently but appropriately returned
+unknown for a cell absent from AX. Vision read that clue but had low status
+confidence (0.2634). Combined input read the clue and recognized completion
+with status confidence 0.8674, passing the unchanged 0.60 diagnostic gate in
+3/3 repeats; median API time was 1.267 s. Identical repeated answers on one
+screen are not a reliability estimate. These are diagnostic questions, not
+the production action-selection batch. No phone inputs; the app remains on
+the same completed board. The provider option still sends text only and Jev
+remains the default. Combined live control is not wired in.
+
+All 23 DecisionReplay tests pass. The original shared ledger now has 26 entries,
+**$0.47 conservatively reserved and $4.53 reservable** under the unchanged $5
+local cap. Reservations are not charges; all nine requests used free access.
+No billing, token, or scheduling change. See
+`research/artifacts/clef-multimodal/20261005/comparison.json`, the read-only
+`tests/DecisionReplay/compare_modalities.py`, and
+[remote Clef evaluation](../research/jev_clef_remote.md).
+
+**Earlier live result:** eight free-access requests produced one supervised
+visual tap: full Clef located the victory panel's X using a generic coordinate
+grid and a model-selected close-up, physical HID dismissed it, and a second
+screenshot confirmed the change. No AX/OCR, game state files, or operator
+coordinates were used. `tests/DecisionReplay/vision_live.py` is an opt-in,
+one-tap experiment with fixed presence/confidence gates, pixel freshness,
+three-call cap, no retries, and the existing budget ledger. A low-confidence
+coarse choice can select a read-only crop; only the refined choice can permit
+input. Terminal trial mode stopped without input. Dismissal was a separate
+explicit setup invocation, not an autonomous game-playing action.
+
+The subsequent restart attempt was blocked: Clef misclassified the completed
+100% board as playing, with low confidence. No new game was started. The app
+remains on the completed board with its victory illustration dismissed. This
+is one successful supervised targeting example, not general visual control.
+All 22 replay/budget/live-guard tests pass. The shared ledger now has **$0.29
+conservatively reserved and $4.71 remaining**; these are internal reservations,
+not charges. No paid credits, subscription, or new schedule. See the latest
+section of [remote Clef evaluation](../research/jev_clef_remote.md) and
+`research/artifacts/clef-vision-live/20261005/05-close-panel-refined-clef/`.
+
+**Earlier screenshot comparison:** a user-requested retry succeeded at about 06:26 Pacific
+on October 5 without billing changes. The small loss-image Clef probe passed
+(1.165 s), followed by one pass of playing/lost/won screenshots on both
+models: **Clef 3/3 screenshots and 9/9 questions; Clef-flash 3/3 and 9/9**.
+Median API times were 1.330 s / 0.796 s, respectively. All six comparison
+requests used fresh connections and succeeded. These are three-image
+perception results, not live-control reliability. Selected-cell confidence
+was low (0.2932 / 0.1733), and Flash's correct loss-state answer had confidence
+0.2165; do not weaken action guards based on correct choices alone.
+Seven successful requests including the probe were added to the original
+ledger: **$0.15 total conservatively reserved, $4.85 remaining**, with two
+earlier failures still lacking usage. Successful reported usage estimates
+total $0.00210735 before the free allowance, not a confirmed charge. No phone
+inputs, billing changes, or new schedule. Details:
+`research/artifacts/clef-vision-budget/20261005-small-vision-comparison.json`.
+
+`jev --provider cloudflare --model clef|clef-flash` now selects Workers AI;
+TypeSafe/Jev remains the default and the controller remains accessibility-only.
+Transport configuration/envelope checks are covered by offline tests.
+The read-only provider replay uses the ten pre-labeled DecisionReplay cases;
+the separate vision suite uses three visually reviewed Donpa screenshots with
+no AX/OCR evidence or phone input.
+
+The 90-request paired comparison completed: Jev 27/30 correct frozen decisions,
+Clef 15/30, Clef-flash 9/30; median API latencies 239 / 2,645 / 1,082 ms.
+These are exact-decision results with existing prompts, not task success rates.
+Both Clef models answered all five questions on one active-board screenshot
+correctly across three repeats. Win/loss PNGs and JPEGs hit HTTP 413 token
+estimation errors; subsequent HTTP 429 diagnostics confirmed exhaustion of the
+account's 10,000-neuron daily free allowance. No more inference was attempted
+after confirming the quota. The harness now saves and stops on HTTP 429.
+Keep Jev as default; general screenshot-only control remains unimplemented.
+[Results, failures and next steps](../research/jev_clef_remote.md).
+
+The user subsequently authorized a $5 vision-test budget. Vision replays now
+persist conservative reservations in
+`research/artifacts/clef-vision-budget/ledger.json` before sending requests;
+reuse that ledger across every run. A smaller full-frame JPEG arm fits below
+250 KB per request. Its one new loss-image probe still received HTTP 429/code
+4006, so inference remains blocked; $0.02 is reserved, actual usage unknown.
+The user chose $5 prepaid credits, but the signed-in checkout requires $10
+plus a $0.50 fee, and the user reports that Cloudflare rejects their billing
+address. Stop the billing workflow; no payment was submitted by the agent or
+subscription enabled. No provider cap or automatic top-up setting was
+configured. The free allowance resets at 00:00 UTC; the last quota failure
+was in the same UTC day as the 2026-10-04 03:13 check. A single follow-up in
+this task was scheduled for October 4 at 17:05 America/Los_Angeles
+(`resume-clef-vision-after-free-quota-reset`): one small loss probe, then one
+three-case repeat per model if successful, using the same budget ledger and
+stopping on errors. No phone input or billing changes. Prepaid gateway
+routing remains unimplemented; the current
+token's gateway-list read failed with HTTP 403/code 10000. 17 replay/budget
+tests passed at that earlier checkpoint; the later supervised tap is described above.
+
+**Follow-up result, October 4 after 17:05 Pacific:** the single small loss
+probe still returned HTTP 429/code 4006 (0.506 s) after the documented reset.
+The reason remains unconfirmed. The conditional six-request comparison did
+not run; no retry, phone input, billing change, or new schedule was made.
+The one-time attempt is finished. The original ledger entry is preserved,
+with **$0.04 total conservatively reserved and $4.96 remaining** across two
+requests with unknown usage. This is a reservation, not confirmed spending.
+Result: `research/artifacts/clef-vision-budget/20261004-reset-loss-probe.json`.
+
+113 Jev Swift tests, 11 replay tests and 8 command tests passed; signed release
+build passed. No firmware patches changed.
+
+## Current state — 2026-09-27
+
+Protocol v2 now binds planner proposals to the actual offered operation and target. Jev still independently judges each input. The controller rejects mismatches, checks all planner actions again before execution, and requires a separate original-goal status judgment. Optional `--planner-max-actions=2...6` enables checked routes on one unique native-action owner. The default is one action, and the planner itself remains opt-in.
+
+The implementation passes 107 Swift and 23 Python tests. The signed release build and strict signature verification pass. A generic Settings navigation test reached About from the Home screen. The ambiguous Settings label inside Donpa's result panel remains a limitation; the controller rejects the mismatched choice without input.
+
+A fresh single-action run `20260927-132209` won in 1,058.280 seconds, with no native input after the result. It was slower than the previous record. A batched medium-reasoning trial `20260927-134306` also won in 964.101 seconds, with zero native input after the result. Seven checked continuations had a median decision time of 207.4 ms. Neither new trial beat the earlier 670.410-second controller record. The final revision also waits for stable layout after acknowledged planner input. A repeat of the same Settings path used the same five inputs, reduced stale-action replans from two to zero, and completed in 64.158 seconds versus 75.602 seconds. These single trials do not establish universal speed or win-rate gains. [Speed study, traces, and limitations](../research/jev_simulator_speed.md).
+
+Use `/Applications/ChatGPT.app/Contents/Resources/codex` through `JEV_CODEX_BINARY` on this machine. The Homebrew Codex executable exits with status 137. `JEV_PLANNER_REASONING_EFFORT` defaults to `high`; `medium` is an opt-in experiment. Frozen medium probes were faster but missed one valid deduction.
+
+## Previous state — 2026-09-25
+
+**Final implementation: verified fresh-board win.** Run `215713` started at 0%,
+opened at 82%, and reached 100% with the atomic planner plus Jev native executor.
+It stopped after 68 decisions in 670.410 seconds. The native win panel appeared
+at 650.804 seconds and stayed stable for 96 samples; the complete audit had no
+errors and no acknowledged input after the result. The terminal screenshot was
+visually reviewed. This is one successful fresh-board trial, not an estimated
+win rate. [Audit, failures, and recordings](../research/jev_minesweeper_iteration.md).
+
+All 90 Swift, 7 planner-provider Python, and 14 oracle tests pass. The signed
+release build and strict signature verification pass; live play used the debug
+Simulator build. New planner, memory, and focused-prompt options are off by
+default. The classifier and exploration prototypes were removed.
+
+The hybrid external-planner path produced the first independently verified
+Donpa win in `research/artifacts/jev-donpa/20260925-213736/`. The run resumed an
+existing 91% board and reached 100% in 132 steps over 663.256 seconds. The
+native result panel remained stable for 37 samples, the audit completed without
+errors, and no acknowledged input followed the terminal result. Root reviewed
+the terminal screenshot against the native result evidence.
+
+That resumed win alone did not establish fresh-board reliability. The first fresh repeat, `214951`,
+reached 87%, then first lost at 229.923 s. Eight acknowledged post-terminal
+inputs included Retry and replacement-board actions; the planner stopped at
+242.240 s. It is not a fresh-board win or a reliability result.
+
+The fatal transition is preserved in the raw trace: the planner proposed
+opening row 5, column 8, while the current Jev observation was row 3, column
+8 hidden. Jev selected Board `Dig or chord` (`e14:action2`),
+and the next observation reported row 3, column 8 as a mine. The planner's
+textual target and executed native target were different. At that checkpoint, the atomic
+handoff replanned after every Jev decision (512 planner requests maximum). The
+provider requests one current action in text; structural action-ID binding was
+not implemented. Fresh run 215713 completed successfully.
+
+The planner is an opt-in subgoal proposer. It returns `{status, subgoal, reason}`
+with all three fields required, using an empty `subgoal` when blocked or
+complete, and never sends screen coordinates or native input. Jev resolves the
+subgoal through the current accessibility tree. The planner path keeps Jev's
+local blocked, risky, freshness, and target guards. Planner request and
+response usage is recorded in the planner JSONL trace; planner latency remains
+part of Jev decision and wall-clock timings, while planner tokens are excluded
+from Jev token totals.
+
+The current cleanup counts are 90 Swift tests, 7 Python provider tests, and 14
+oracle tests. Failed prompt, memory, validation, and planner experiments remain
+in the linked research and `.codex/pstack-runs` artifacts. They are not part of
+the default controller path. The installed Donpa app and its source checkout
+remain unchanged.
+
 ## Current simulator path — 2026-09-20
 
 ### General controller direction
@@ -32,7 +288,8 @@ The optional `--compact-requests` experiment remains **off by default**:
 tests (including offline export) and 23 Python tests passed. Signed build
 verified. Debug Simulator Contacts created ID 28 at 7.641 s, reported at
 10.659 s, preserved all 27 previous contacts, no audit errors; compact OFF,
-form validation ON. No app rules, OCR or task planner were added.
+form validation ON. At that checkpoint no app rules, OCR, or task planner were
+added to the default controller path.
 
 **Picker options and inline context (2026-09-23):** [results and video](../research/jev_picker_options.md).
 The full Calendar create/save/reopen/reschedule/save workflow passed once:

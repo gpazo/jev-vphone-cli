@@ -18,6 +18,13 @@ struct ActionSpaceTests {
         JevAnswer(type: "choice", noul: nil, choice: choice, score: nil,
                   probabilities: Dictionary(uniqueKeysWithValues: ids.map { ($0, $0 == choice ? 1.0 : 0.0) }), confidence: 0.9)
     }
+    private func response(answers: [String: JevAnswer], usage: JevUsage?) -> JevResponse {
+        var answers = answers
+        for head in ["done", "blocked", "risky"] {
+            answers[head] = JevAnswer(type: "noul", noul: 0, choice: nil, score: nil, probabilities: nil, confidence: nil)
+        }
+        return JevResponse(model: "test", answers: answers, usage: usage)
+    }
     @Test func operationsOnlyOfferCompatibleControls() {
         let s = space([element("button", "button"), element("text", "textfield"), element("slider", "slider")])
         #expect(Set(s.targets[.dragUp]!.keys) == ["slider"])
@@ -61,14 +68,14 @@ struct ActionSpaceTests {
         let s = space([element("button", "button")])
         let action = answer("tap", ids: s.operations.map(\.rawValue))
         let invalid = answer("unknown", ids: ["unknown"])
-        let result = JevModelDecider.decode(JevResponse(model: "test", answers: ["action": action, "tap_target": invalid], usage: nil), space: s)
+        let result = JevModelDecider.decode(response(answers: ["action": action, "tap_target": invalid], usage: nil), space: s)
         #expect(result.failure?.contains("tap_target") == true)
-        let missing = JevModelDecider.decode(JevResponse(model: "test", answers: ["action": action], usage: nil), space: s)
+        let missing = JevModelDecider.decode(response(answers: ["action": action], usage: nil), space: s)
         #expect(missing.failure != nil)
     }
     @Test func unusedInvalidHeadCannotChangeSelectedAction() {
         let s = space([element("button", "button"), element("text", "textfield")])
-        let response = JevResponse(model: "test", answers: [
+        let response = response(answers: [
             "action": answer("tap", ids: s.operations.map(\.rawValue)),
             "tap_target": answer("button", ids: Array(s.targets[.tap]!.keys)),
             "type_text_target": answer("invalid", ids: ["invalid"]),
@@ -84,7 +91,7 @@ struct ActionSpaceTests {
         let s = space([element("number", "picker", "9"), element("period", "picker", "AM")])
         let options = s.targets[.setPickerValue]!
         let chosen = options.first { $0.value.elementID == "period" }!.key
-        let decision = JevModelDecider.decode(JevResponse(model: "test", answers: [
+        let decision = JevModelDecider.decode(response(answers: [
             "action": answer("set_picker_value", ids: s.operations.map(\.rawValue)),
             "set_picker_value_target": answer(chosen, ids: Array(options.keys)),
         ], usage: nil), space: s)
@@ -102,14 +109,14 @@ struct ActionSpaceTests {
         let s = space([element("first", "button"), element("second", "button")])
         let target = JevAnswer(type: "choice", noul: nil, choice: "first", score: nil,
             probabilities: ["first": 0.55, "second": 0.45], confidence: 0.2)
-        let decision = JevModelDecider.decode(JevResponse(model: "test", answers: [
+        let decision = JevModelDecider.decode(response(answers: [
             "action": answer("tap", ids: s.operations.map(\.rawValue)), "tap_target": target,
         ], usage: nil), space: s)
         #expect(decision.confidence == 0.9)
         #expect(decision.targetConfidence == 0.2)
         #expect(decision.targetProbability == 0.55)
         #expect(decision.executionConfidence == 0.2)
-        let finished = JevModelDecider.decode(JevResponse(model: "test", answers: [
+        let finished = JevModelDecider.decode(response(answers: [
             "action": answer("finish", ids: s.operations.map(\.rawValue)), "tap_target": target,
         ], usage: nil), space: s)
         #expect(finished.targetConfidence == nil)
@@ -133,7 +140,7 @@ struct ActionSpaceTests {
         let experiment = JevActionSpace(observation: observation, apps: [], textCandidates: [], pickerValues: [], includeStopUnable: true)
         #expect(!normal.operations.contains(.stopUnable))
         #expect(experiment.operations.contains(.stopUnable))
-        let response = JevResponse(model: "test", answers: ["action": answer("stop_unable", ids: experiment.operations.map(\.rawValue))], usage: nil)
+        let response = response(answers: ["action": answer("stop_unable", ids: experiment.operations.map(\.rawValue))], usage: nil)
         #expect(JevModelDecider.decode(response, space: normal).failure != nil)
         #expect(JevModelDecider.decode(response, space: experiment).action == .stopUnable)
     }

@@ -1,5 +1,11 @@
 # Existing game evaluation: Donpa Squad
 
+**2026-09-25 audit:** [implementation, testing, and live recheck](jev_game_audit_20260925.md).
+All 64 focused Swift tests and four evaluator tests passed. A manually prepared,
+resumed board received 100 Jev inputs in 58.626 s but stayed at 66% clearance;
+no verified win. Fresh-game navigation also failed. The audit records timer
+interference with repetition checks and evaluator/provenance limitations.
+
 The evaluation uses the unchanged MIT-licensed [Donpa Squad](https://github.com/vlumi/donpa)
 at `162955f33769e30d3a2d19cece13e2abac001519`. This is an existing Minesweeper
 app, built from its original XcodeGen project. No solver, hidden mine positions,

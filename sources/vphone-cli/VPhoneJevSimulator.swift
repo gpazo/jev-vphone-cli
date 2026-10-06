@@ -321,7 +321,7 @@ struct JevSimulatorObserver: JevObservationProvider {
             return JevElement(id: "\(owner.id):action\(index + 1)", role: "accessibilityaction", label: name,
                 value: owner.value, point: owner.point,
                 context: [owner.context, owner.label].compactMap { $0 }.joined(separator: " > "),
-                customAction: .init(name: name, ownerLabel: owner.label, ownerValue: owner.value))
+                customAction: .init(name: name, ownerLabel: owner.label, ownerValue: owner.value, ownerID: owner.id))
         }
     }
 

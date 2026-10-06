@@ -2,6 +2,8 @@ import ArgumentParser
 import CoreGraphics
 import Foundation
 
+extension VPhoneJevClient.Provider: ExpressibleByArgument {}
+
 // MARK: - jev
 
 struct VPhoneJevCommand: ParsableCommand {
@@ -9,13 +11,14 @@ struct VPhoneJevCommand: ParsableCommand {
         commandName: "jev",
         abstract: "Drive a running virtual iPhone toward a goal stated in plain language",
         discussion: """
-        Observes the phone's screen as text, asks Jev (TypeSafe's System One
-        model) for one bounded action at a time, executes it, and repeats.
+        Observes the phone's accessibility tree as text, asks the selected
+        decision model for one bounded action, executes it, and repeats.
 
         The target must already be booted. Use --simulator <udid> for an iOS
         Simulator, or the automation socket that `make boot` creates for a VM.
 
-        Requires a TypeSafe API key in TYPESAFE_API_KEY, or --api-key.
+        Defaults to TypeSafe using TYPESAFE_API_KEY. For Clef, select
+        --provider cloudflare and set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN.
 
         Examples:
           vphone-cli jev "turn on airplane mode"
@@ -51,11 +54,20 @@ struct VPhoneJevCommand: ParsableCommand {
     @Option(help: "Give up after this many steps.")
     var maxSteps: Int = 25
 
-    @Option(help: "TypeSafe API key. Defaults to $TYPESAFE_API_KEY.")
+    @Option(help: "Decision provider: typesafe or cloudflare (experimental).")
+    var provider: VPhoneJevClient.Provider = .typesafe
+
+    @Option(help: "API key for the selected provider; defaults to its environment variable.")
     var apiKey: String?
 
-    @Option(help: "TypeSafe model identifier.")
-    var model: String = VPhoneJevClient.defaultModel
+    @Option(help: "Model identifier; defaults to jev-latest for TypeSafe or clef for Cloudflare. Cloudflare also supports clef-flash.")
+    var model: String?
+
+    @Option(help: "Cloudflare account ID. Defaults to $CLOUDFLARE_ACCOUNT_ID.")
+    var cloudflareAccountId: String?
+
+    @Flag(help: "Experiment: Jev judges accessibility first; use one budgeted Clef screenshot fallback only below action/target confidence 0.85. Simulator only.")
+    var clefVisionFallback = false
 
     @Flag(name: .shortAndLong, help: "Print the full state sent to Jev each step.")
     var verbose = false
@@ -75,6 +87,18 @@ struct VPhoneJevCommand: ParsableCommand {
     @Flag(help: "Experiment: shorter operation/target instructions; identical state, choices and validation gates.")
     var compactRequests = false
 
+    @Flag(help: "Experiment: goal-focused operation/tap instructions when native named actions are present; identical state, choices and gates.")
+    var focusedRequests = false
+
+    @Flag(help: "Experiment: retain bounded historical values of native named-action owners from this run.")
+    var rememberControls = false
+
+    @Option(help: "Optional external JSON planner executable; Jev still selects and validates each native action.")
+    var planner: String?
+
+    @Option(help: "Maximum checked native inspection steps per planner response (1...6); requires --planner above 1.")
+    var plannerMaxActions = 1
+
     @Flag(
         help: """
         Ablation: run the identical loop with the judgment replaced by label         matching and no model calls. Everything else — observation, gates,         freshness checks, actuation — is unchanged, so a difference in outcome         is attributable to the judgment alone.
@@ -88,6 +112,18 @@ struct VPhoneJevCommand: ParsableCommand {
         }
         guard maxSteps > 0 else {
             throw ValidationError("--max-steps must be greater than zero.")
+        }
+        if compactRequests && focusedRequests {
+            throw ValidationError("Choose only one request experiment: --compact-requests or --focused-requests.")
+        }
+        guard (1...VPhoneJevAgent.Policy.maxPlannerRouteSteps).contains(plannerMaxActions), plannerMaxActions == 1 || planner != nil else {
+            throw ValidationError("--planner-max-actions must be 1...6 and requires --planner above 1.")
+        }
+        if planner != nil && baseline {
+            throw ValidationError("--planner cannot be combined with --baseline.")
+        }
+        if clefVisionFallback && (provider != .typesafe || baseline || simulator == nil || validateForms) {
+            throw ValidationError("--clef-vision-fallback requires TypeSafe/Jev, a simulator, and no --baseline or --validate-forms.")
         }
     }
 
@@ -125,7 +161,14 @@ struct VPhoneJevCommand: ParsableCommand {
     @MainActor
     private func execute() async throws {
         let setupStarted = ProcessInfo.processInfo.systemUptime
-        let client = baseline ? nil : try VPhoneJevClient(apiKey: apiKey, model: model)
+        let client = baseline ? nil : try VPhoneJevClient(apiKey: apiKey, model: model,
+            provider: provider, accountID: cloudflareAccountId)
+        let visionClient = clefVisionFallback ? try VPhoneJevClient(model: "clef", provider: .cloudflare,
+            accountID: cloudflareAccountId) : nil
+        let visionHelper = FileManager.default.currentDirectoryPath + "/tests/DecisionReplay/clef_fallback.zsh"
+        if clefVisionFallback && !FileManager.default.isExecutableFile(atPath: visionHelper) {
+            throw ValidationError("Run --clef-vision-fallback from the repository root with its Python environment installed.")
+        }
         let observer: any JevObservationProvider
         let liveActuator: any JevActuator
         var apps: [(bundleId: String, name: String)] = []
@@ -173,6 +216,7 @@ struct VPhoneJevCommand: ParsableCommand {
 
         var policy = VPhoneJevAgent.Policy.default
         policy.maxSteps = maxSteps
+        policy.plannerSubgoalSteps = plannerMaxActions
         policy.corroborateCompletion = !terminalChoiceCompletion
         if simulator != nil { policy.settlePollMilliseconds = 30 }
 
@@ -196,10 +240,28 @@ struct VPhoneJevCommand: ParsableCommand {
             }
             let goalStarted = session ? ProcessInfo.processInfo.systemUptime : setupStarted
             var totals: [String: Double] = session ? [:] : ["setup and probe": setupSeconds]
-            let decider: any JevDecider = baseline
+            let baseDecider: any JevDecider = baseline
                 ? JevBaselineDecider(goal: currentGoal)
                 : JevModelDecider(client: client!, terminalChoiceCompletion: terminalChoiceCompletion,
-                                  validateForms: validateForms, compactRequests: compactRequests)
+                                  validateForms: validateForms, compactRequests: compactRequests,
+                                  focusedRequests: focusedRequests)
+            let groundedDecider: any JevDecider
+            if let visionClient, let simulatorBridge {
+                var secondary = JevModelDecider(client: visionClient, terminalChoiceCompletion: terminalChoiceCompletion,
+                    compactRequests: compactRequests, focusedRequests: focusedRequests, includeVisionDiagnostic: true)
+                let udid = simulatorBridge.udid
+                secondary.requestOverride = { state, questions in
+                    try await JevClefVisionTransport.ask(client: visionClient, state: state, questions: questions,
+                        simulator: udid, executable: visionHelper)
+                }
+                groundedDecider = JevVisionFallbackDecider(primary: baseDecider, vision: secondary,
+                    observer: observer, policy: policy)
+            } else { groundedDecider = baseDecider }
+            let decider: any JevDecider
+            if let planner {
+                decider = JevPlannerDecider(base: groundedDecider,
+                    executable: URL(fileURLWithPath: planner).standardizedFileURL.path, policy: policy)
+            } else { decider = groundedDecider }
             let agent = VPhoneJevAgent(
                 goal: currentGoal,
                 decider: decider,
@@ -209,6 +271,7 @@ struct VPhoneJevCommand: ParsableCommand {
                 mode: dryRun ? .dryRun : (yes ? .unattended : .live)
             )
             agent.installedApps = apps
+            agent.rememberControls = rememberControls
             agent.facts = factProvider
             // A queued goal must never be consumed as a confirmation answer.
             if session { agent.confirm = { _ in false } }

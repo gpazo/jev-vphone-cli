@@ -67,6 +67,14 @@ final class VPhoneJevAgent {
         var finishAccepted = 0.5
         /// Experimental readiness must be a majority, including non-commit taps.
         var formReadiness = 0.5
+        var maxPlannerPlans = 512
+        var maxVisionRecoveries = 3
+        static let maxPlannerRouteSteps = 6
+        var plannerSubgoalSteps = 1
+        var plannerTimeoutSeconds = 60.0
+        var plannerTerminationGraceSeconds = 1.0
+        var maxPlannerResponseBytes = 4096
+        var maxPlannerSubgoalBytes = 2048
         /// Hand back to the human at or above this `blocked` probability.
         ///
         /// Measured on real permission dialogs, which sat at 0.54-0.59 — just
@@ -162,6 +170,8 @@ final class VPhoneJevAgent {
 
     /// Installed apps offered as `open_app` options. Empty disables the branch.
     var installedApps: [(bundleId: String, name: String)] = []
+    /// Opt-in verbatim observations of named-action owners; no action policy.
+    var rememberControls = false
     /// Reads observed device state, so "did it work" is answered by fact
     /// rather than by the model's reading of its own screenshot.
     var facts: (any JevFactProvider)?
@@ -221,11 +231,12 @@ final class VPhoneJevAgent {
 
         var lastSignature: String?
         var lastDocument: (app: String, title: String)?
-        var progress = JevProgress()
+        var progress = JevProgress(rememberControls: rememberControls)
         var pendingLinkDocument: String?
         var needsStableLayout = false
         var pendingObservation: JevObservation?
         var inputRejection: String?
+        var reobservingForPlanner = false
 
         for index in 1 ... policy.maxSteps {
             var observation: JevObservation
@@ -253,12 +264,15 @@ final class VPhoneJevAgent {
 
             // Clear interstitials before asking anything: they are not a
             // judgment, and they otherwise eat a step each.
-            if interstitialsDismissed < policy.maxInterstitials,
+            let allowInterstitialDismissal = !reobservingForPlanner
+            reobservingForPlanner = false
+            if allowInterstitialDismissal, interstitialsDismissed < policy.maxInterstitials,
                let dismissal = interstitialDismissal(in: observation)
             {
                 interstitialsDismissed += 1
                 _ = try await tapFindingControl(dismissal, in: observation)
                 progress.executed("dismiss \"\(dismissal.label)\"", target: dismissal, before: observation)
+                decider.executionDidResolve(.acknowledged(nil))
                 lastSignature = nil
                 continue
             }
@@ -293,11 +307,27 @@ final class VPhoneJevAgent {
                 textCandidates: textCandidates
             )
             mark(index, "Jev decision")
+            totalInputTokens += decision.inputTokens
             if let failure = decision.failure {
                 return .stopped(reason: failure, steps: index)
             }
-            totalInputTokens += decision.inputTokens
+            switch decision.recovery {
+            case .reobserve?:
+                report(index, decision, "replanning after unresolved vision; no input executed", false)
+                lastSignature = nil
+                reobservingForPlanner = true
+                continue
+            case .unresolvedVision?:
+                return .stopped(reason: "Vision recovery needs a planner", steps: index)
+            case nil: break
+            }
 
+            var acknowledged = false
+            defer {
+                if let token = decision.executionToken, !acknowledged {
+                    decider.executionDidResolve(.rejected(token, "input was not acknowledged"))
+                }
+            }
             let action = decision.action
             let confidence = decision.executionConfidence
             let doneP = decision.done
@@ -471,14 +501,19 @@ final class VPhoneJevAgent {
             mark(index, "gates")
 
             var executable = plan
-            if case let .tap(element) = plan {
-                switch await revalidate(element, expected: observation, wholeForm: decision.tapReadiness == "ready") {
-                case let .fresh(current):
-                    executable = .tap(current)
+            if let element = plan.target, action == .tap || decision.observationGuard != nil {
+                switch await revalidate(element, expected: observation, wholeForm: decision.tapReadiness == "ready",
+                    observationGuard: decision.observationGuard) {
+                case let .fresh(current): executable = plan.replacingTarget(current)
                 case let .stale(reason):
-                    // The screen moved on between the judgment and the touch.
-                    // Acting now would act on something Jev never saw.
-                    report(index, decision, plan.detail, false)
+                    inputRejection = reason
+                    report(index, decision, reason, false)
+                    lastSignature = nil
+                    continue
+                }
+            } else if let guardEvidence = decision.observationGuard {
+                guard let fresh = try? await provider.observe(), guardEvidence.rejection(in: fresh) == nil else {
+                    report(index, decision, "planner execution evidence changed", false)
                     lastSignature = nil
                     continue
                 }
@@ -515,6 +550,8 @@ final class VPhoneJevAgent {
 
             report(index, decision, detail, true)
             if action != .wait {
+                acknowledged = true
+                decider.executionDidResolve(.acknowledged(decision.executionToken))
                 inputRejection = nil
                 progress.executed(detail, target: executable.target, before: observation)
             }
@@ -522,6 +559,7 @@ final class VPhoneJevAgent {
                 pendingLinkDocument = observation.documentTitle
             }
             needsStableLayout = [.scrollDown, .scrollUp, .dragUp, .dragDown].contains(action)
+                || (acknowledged && decision.executionToken != nil)
 
             // Semantic input already has a readiness check: taps re-observe
             // above, other actions settle at the next loop. A second fixed
@@ -671,10 +709,13 @@ final class VPhoneJevAgent {
     /// signature includes the value, a switch that flipped between the
     /// decision and the touch correctly reads as stale rather than being
     /// toggled back.
-    private func revalidate(_ element: JevElement, expected: JevObservation, wholeForm: Bool = false) async -> Freshness {
-        guard let observation = try? await (wholeForm ? provider.observe() : provider.observeForValidation(of: element)) else {
+    private func revalidate(_ element: JevElement, expected: JevObservation, wholeForm: Bool = false,
+                            observationGuard: JevPlannerObservationGuard? = nil) async -> Freshness {
+        guard let observation = try? await (wholeForm || observationGuard != nil ? provider.observe() : provider.observeForValidation(of: element)) else {
             return .stale("Cannot verify the selected target")
         }
+
+        if let reason = observationGuard?.rejection(in: observation) { return .stale(reason) }
 
         if wholeForm, expected.completenessIssue != nil || observation.completenessIssue != nil || observation.signature != expected.signature {
             return .stale("Form evidence changed while choosing")
@@ -848,6 +889,16 @@ final class VPhoneJevAgent {
             case let .tap(element), let .drag(element, _), let .select(element, _): element
             case let .type(_, element): element
             default: nil
+            }
+        }
+
+        func replacingTarget(_ element: JevElement) -> Plan {
+            switch self {
+            case .tap: .tap(element)
+            case let .drag(_, up): .drag(element, up: up)
+            case let .select(_, value): .select(element, value: value)
+            case let .type(text, _): .type(text, element)
+            default: self
             }
         }
 

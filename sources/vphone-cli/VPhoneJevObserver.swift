@@ -26,6 +26,7 @@ struct JevElement: Equatable {
         let name: String
         let ownerLabel: String
         let ownerValue: String?
+        var ownerID: String? = nil
     }
     var customAction: CustomAction? = nil
     /// Native editable-field identity when iOS omits its label while empty.

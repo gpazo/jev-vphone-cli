@@ -12,8 +12,8 @@ struct JevStepDecision {
     let action: JevAction
     let confidence: Double
     let done: Double
-    let blocked: Double
-    let risky: Double
+    var blocked: Double
+    var risky: Double
     var actionProbability: Double = 0
     /// Keep the selected branch's uncertainty; unused speculative heads have
     /// no bearing on execution. This is not a joint success probability.
@@ -30,6 +30,13 @@ struct JevStepDecision {
     var tapReadiness: String?
     var readinessProbability: Double = 0
 
+    var originalGoalStatus: String?
+    var originalGoalStatusProbability: Double = 0
+    var executionToken: UUID?
+    var observationGuard: JevPlannerObservationGuard?
+    var visionJudgment: JevVisionJudgment?
+    var recovery: JevRecoveryDisposition?
+
     var inputTokens: Int = 0
 
     /// Set when no usable decision could be produced; the agent stops.
@@ -42,10 +49,16 @@ struct JevStepDecision {
     }
 }
 
+enum JevExecutionEvent {
+    case acknowledged(UUID?)
+    case rejected(UUID?, String)
+}
+
 @MainActor
 protocol JevDecider {
     /// Named in run output, so which policy produced a result is never in doubt.
     var name: String { get }
+    func executionDidResolve(_ event: JevExecutionEvent)
 
     func decide(
         observation: JevObservation,
@@ -53,6 +66,10 @@ protocol JevDecider {
         apps: [(bundleId: String, name: String)],
         textCandidates: [String]
     ) async -> JevStepDecision
+}
+
+extension JevDecider {
+    func executionDidResolve(_ event: JevExecutionEvent) {}
 }
 
 // MARK: - Jev
@@ -64,9 +81,17 @@ struct JevModelDecider: JevDecider {
     var terminalChoiceCompletion = false
     var validateForms = false
     var compactRequests = false
+    var focusedRequests = false
+    var includeVisionDiagnostic = false
+    var requestOverride: ((JevState, [String: JevQuestion]) async throws -> JevResponse)?
 
-    var name: String { "jev (\(client.model))" + (validateForms ? " + experimental form validation" : "")
-        + (compactRequests ? " + experimental compact requests" : "") }
+    var name: String { client.displayName + (validateForms ? " + experimental form validation" : "")
+        + (compactRequests ? " + experimental compact requests" : "")
+        + (focusedRequests ? " + experimental focused requests" : "") }
+
+    static func pickerValues(in state: JevState) -> [String] {
+        JevPickerValues.extract(from: state.plannerContext?.originalGoal ?? state.goal)
+    }
 
     func decide(
         observation: JevObservation,
@@ -79,12 +104,12 @@ struct JevModelDecider: JevDecider {
             apps: apps,
             textCandidates: textCandidates,
             hasVerifiedFacts: state.verifiedFacts != nil,
-            pickerValues: JevPickerValues.extract(from: state.goal),
+            pickerValues: Self.pickerValues(in: state),
             includeStopUnable: terminalChoiceCompletion
         )
 
         let space = JevActionSpace(observation: observation, apps: apps,
-            textCandidates: textCandidates, pickerValues: JevPickerValues.extract(from: state.goal),
+            textCandidates: textCandidates, pickerValues: Self.pickerValues(in: state),
             includeStopUnable: terminalChoiceCompletion)
         // Bound speculative work on dense pages. A selected target outside
         // the batch receives the same judgment in one follow-up request.
@@ -93,23 +118,36 @@ struct JevModelDecider: JevDecider {
                 questions[JevQuestions.readinessHead(id)] = JevQuestions.readiness(for: taps[id]!)
             }
         }
-        if compactRequests { questions = JevQuestions.compacted(questions) }
+        if state.plannerContext != nil { questions[JevQuestions.originalGoalStatus] = JevQuestions.originalGoalStatusQuestion }
+        if focusedRequests { questions = JevQuestions.focused(questions, in: observation) }
+        else if compactRequests { questions = JevQuestions.compacted(questions) }
+        let diagnoseProposal = includeVisionDiagnostic && state.plannerContext?.proposedAction != nil
+        if diagnoseProposal { questions[JevQuestions.visionDiagnosis] = JevQuestions.visionDiagnosisQuestion }
 
         let response: JevResponse
         do {
-            response = try await client.ask(state: state, questions: questions)
+            response = try await ask(state: state, questions: questions)
         } catch {
-            return .failed("Jev request failed: \(error)")
+            return .failed("\(client.displayName) request failed: \(error)")
         }
 
         var decision = Self.decode(response, space: space)
+        if state.plannerContext != nil { decision = Self.bindOriginalGoalStatus(response, to: decision) }
+        if diagnoseProposal, decision.failure == nil {
+            guard let answer = response[JevQuestions.visionDiagnosis], let judgment = JevVisionJudgment(answer: answer) else {
+                var failure = JevStepDecision.failed("Missing or invalid Clef visual diagnosis")
+                failure.inputTokens = decision.inputTokens
+                return failure
+            }
+            decision.visionJudgment = judgment
+        }
         if validateForms, decision.failure == nil, decision.action == .tap,
            let id = decision.targetId, let target = space.targets[.tap]?[id] {
             let head = JevQuestions.readinessHead(id)
             var answer = response[head]
             if questions[head] == nil {
                 do {
-                    let validation = try await client.ask(state: state, questions: [head: JevQuestions.readiness(for: target)])
+                    let validation = try await ask(state: state, questions: [head: JevQuestions.readiness(for: target)])
                     answer = validation[head]
                     decision.inputTokens += validation.usage?.inputTokens ?? 0
                 } catch { return .failed("Form validation failed: \(error)") }
@@ -121,6 +159,25 @@ struct JevModelDecider: JevDecider {
             decision.readinessProbability = answer.topProbability
         }
         return decision
+    }
+
+    private func ask(state: JevState, questions: [String: JevQuestion]) async throws -> JevResponse {
+        if let requestOverride { return try await requestOverride(state, questions) }
+        return try await client.ask(state: state, questions: questions)
+    }
+
+    static func bindOriginalGoalStatus(_ response: JevResponse, to decision: JevStepDecision) -> JevStepDecision {
+        guard let answer = response[JevQuestions.originalGoalStatus],
+              answer.validated(against: JevQuestions.originalGoalStatusOptions) == nil else {
+            var failure = JevStepDecision.failed("Missing or invalid original-goal status")
+            failure.inputTokens = response.usage?.inputTokens ?? decision.inputTokens
+            return failure
+        }
+        var result = decision
+        result.inputTokens = response.usage?.inputTokens ?? decision.inputTokens
+        result.originalGoalStatus = answer.choice
+        result.originalGoalStatusProbability = answer.topProbability
+        return result
     }
 
     static func decode(_ response: JevResponse, space: JevActionSpace) -> JevStepDecision {
@@ -140,10 +197,18 @@ struct JevModelDecider: JevDecider {
             target = selected.choice.flatMap { candidates[$0] }
             targetAnswer = selected
         }
+        var nouls: [String: Double] = [:]
+        for head in [JevQuestions.done, JevQuestions.blocked, JevQuestions.risky] {
+            guard let answer = response[head], answer.type == "noul", let value = answer.noul,
+                  value.isFinite, (0...1).contains(value) else {
+                var failure = JevStepDecision.failed("Missing or invalid \(head) judgment")
+                failure.inputTokens = response.usage?.inputTokens ?? 0
+                return failure
+            }
+            nouls[head] = value
+        }
         return JevStepDecision(action: action, confidence: answer.confidenceOrZero,
-            done: response[JevQuestions.done]?.noul ?? 0,
-            blocked: response[JevQuestions.blocked]?.noul ?? 0,
-            risky: response[JevQuestions.risky]?.noul ?? 0,
+            done: nouls[JevQuestions.done]!, blocked: nouls[JevQuestions.blocked]!, risky: nouls[JevQuestions.risky]!,
             actionProbability: answer.topProbability,
             targetConfidence: targetAnswer?.confidence, targetProbability: targetAnswer?.topProbability,
             targetId: target?.elementID, appId: target?.appID, textId: target?.textID,
