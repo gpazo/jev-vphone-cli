@@ -48,6 +48,9 @@ struct VPhoneJevCommand: ParsableCommand {
     @Flag(help: "Keep the simulator and Jev connections ready; read one goal per stdin line until EOF.")
     var session = false
 
+    @Flag(help: "With --session, read JSON lines containing id and goal; emit ready, result, and rejected events on stdout.")
+    var sessionJson = false
+
     @Flag(name: .shortAndLong, help: "Act without asking, including on risky steps.")
     var yes = false
 
@@ -96,7 +99,10 @@ struct VPhoneJevCommand: ParsableCommand {
     @Option(help: "Optional external JSON planner executable; Jev still selects and validates each native action.")
     var planner: String?
 
-    @Option(help: "Maximum checked native inspection steps per planner response (1...6); requires --planner above 1.")
+    @Flag(help: "Decompose a compound goal using the bundled guarded Codex planner (requires Codex login).")
+    var decompose = false
+
+    @Option(help: "Maximum checked native inspection steps per planner response (1...6); requires --planner or --decompose above 1.")
     var plannerMaxActions = 1
 
     @Flag(
@@ -110,17 +116,23 @@ struct VPhoneJevCommand: ParsableCommand {
         if goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !session {
             throw ValidationError("Provide a goal, or use --session to read goals from stdin.")
         }
+        if sessionJson && (!session || !goal.isEmpty) {
+            throw ValidationError("--session-json requires --session and goals supplied as JSON lines on stdin.")
+        }
+        if decompose && planner != nil {
+            throw ValidationError("Choose either --decompose or --planner.")
+        }
         guard maxSteps > 0 else {
             throw ValidationError("--max-steps must be greater than zero.")
         }
         if compactRequests && focusedRequests {
             throw ValidationError("Choose only one request experiment: --compact-requests or --focused-requests.")
         }
-        guard (1...VPhoneJevAgent.Policy.maxPlannerRouteSteps).contains(plannerMaxActions), plannerMaxActions == 1 || planner != nil else {
-            throw ValidationError("--planner-max-actions must be 1...6 and requires --planner above 1.")
+        guard (1...VPhoneJevAgent.Policy.maxPlannerRouteSteps).contains(plannerMaxActions), plannerMaxActions == 1 || planner != nil || decompose else {
+            throw ValidationError("--planner-max-actions must be 1...6 and requires --planner or --decompose above 1.")
         }
-        if planner != nil && baseline {
-            throw ValidationError("--planner cannot be combined with --baseline.")
+        if (planner != nil || decompose) && baseline {
+            throw ValidationError("--planner and --decompose cannot be combined with --baseline.")
         }
         if clefVisionFallback && (provider != .typesafe || baseline || simulator == nil || validateForms) {
             throw ValidationError("--clef-vision-fallback requires TypeSafe/Jev, a simulator, and no --baseline or --validate-forms.")
@@ -161,6 +173,28 @@ struct VPhoneJevCommand: ParsableCommand {
     @MainActor
     private func execute() async throws {
         let setupStarted = ProcessInfo.processInfo.systemUptime
+        let plannerPath: String? = if decompose { try Self.bundledPlannerPath() } else { planner }
+        let jsonOutput: FileHandle?
+        if sessionJson {
+            fflush(stdout)
+            let descriptor = dup(STDOUT_FILENO)
+            guard descriptor >= 0 else { throw ValidationError("Could not open session output.") }
+            jsonOutput = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+            guard dup2(STDERR_FILENO, STDOUT_FILENO) >= 0 else {
+                throw ValidationError("Could not redirect session diagnostics.")
+            }
+        } else { jsonOutput = nil }
+        defer {
+            if let jsonOutput { fflush(stdout); _ = dup2(jsonOutput.fileDescriptor, STDOUT_FILENO) }
+        }
+        func emit(_ event: JevSessionEvent) throws {
+            guard let jsonOutput else { return }
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            var data = try encoder.encode(event)
+            data.append(0x0A)
+            try jsonOutput.write(contentsOf: data)
+        }
         let client = baseline ? nil : try VPhoneJevClient(apiKey: apiKey, model: model,
             provider: provider, accountID: cloudflareAccountId)
         let visionClient = clefVisionFallback ? try VPhoneJevClient(model: "clef", provider: .cloudflare,
@@ -218,8 +252,12 @@ struct VPhoneJevCommand: ParsableCommand {
         policy.maxSteps = maxSteps
         policy.plannerSubgoalSteps = plannerMaxActions
         policy.corroborateCompletion = !terminalChoiceCompletion
-        if simulator != nil { policy.settlePollMilliseconds = 30 }
+        if simulator != nil {
+            policy.settlePollMilliseconds = 30
+            policy.settleQuietMilliseconds = 150
+        }
 
+        var requests = JevSessionRequests()
         var pendingGoal: String? = goal.isEmpty ? nil : goal
         if session {
             // Start every guest service before announcing readiness. No goal
@@ -229,14 +267,25 @@ struct VPhoneJevCommand: ParsableCommand {
             await client?.prepareConnection()
             Swift.print(String(format: "  ready     setup %.3f seconds; enter a goal per line", ProcessInfo.processInfo.systemUptime - setupStarted))
             fflush(stdout)
+            try emit(.init(event: "ready", elapsedSeconds: ProcessInfo.processInfo.systemUptime - setupStarted))
         }
         while true {
+            var requestID: String?
             let currentGoal: String
             if let pendingGoal { currentGoal = pendingGoal }
             else {
                 guard let line = readLine() else { break }
-                if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
-                currentGoal = line
+                if sessionJson {
+                    switch requests.accept(line) {
+                    case let .goal(request): currentGoal = request.goal; requestID = request.id
+                    case let .rejected(id, reason):
+                        try emit(.init(event: "rejected", id: id, reason: reason))
+                        continue
+                    }
+                } else {
+                    if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+                    currentGoal = line
+                }
             }
             let goalStarted = session ? ProcessInfo.processInfo.systemUptime : setupStarted
             var totals: [String: Double] = session ? [:] : ["setup and probe": setupSeconds]
@@ -258,9 +307,9 @@ struct VPhoneJevCommand: ParsableCommand {
                     observer: observer, policy: policy)
             } else { groundedDecider = baseDecider }
             let decider: any JevDecider
-            if let planner {
+            if let plannerPath {
                 decider = JevPlannerDecider(base: groundedDecider,
-                    executable: URL(fileURLWithPath: planner).standardizedFileURL.path, policy: policy)
+                    executable: URL(fileURLWithPath: plannerPath).standardizedFileURL.path, policy: policy)
             } else { decider = groundedDecider }
             let agent = VPhoneJevAgent(
                 goal: currentGoal,
@@ -297,10 +346,37 @@ struct VPhoneJevCommand: ParsableCommand {
                 }
             }
 
-            header(probe, goal: currentGoal, appCount: agent.installedApps.count, policy: decider.name)
+            let currentProbe: JevObservation
+            do { currentProbe = session ? try await observer.observe() : probe }
+            catch {
+                try emit(.init(event: "result", id: requestID, goal: currentGoal, outcome: "failed",
+                    reason: "Could not observe the phone: \(error)", elapsedSeconds: ProcessInfo.processInfo.systemUptime - goalStarted))
+                throw error
+            }
+            header(currentProbe, goal: currentGoal, appCount: agent.installedApps.count, policy: decider.name)
 
-            let outcome = try await agent.run()
+            let outcome: VPhoneJevAgent.Outcome
+            do { outcome = try await agent.run() }
+            catch {
+                guard session else { throw error }
+                try emit(.init(event: "result", id: requestID, goal: currentGoal, outcome: "failed",
+                    reason: String(describing: error), elapsedSeconds: ProcessInfo.processInfo.systemUptime - goalStarted,
+                    inputTokens: agent.totalInputTokens))
+                Swift.print("  failed    \(error)")
+                pendingGoal = nil
+                _ = try await observer.observe()
+                continue
+            }
             footer(outcome, tokens: agent.totalInputTokens)
+            try emit(JevSessionEvent(id: requestID, goal: currentGoal, outcome: outcome,
+                elapsedSeconds: ProcessInfo.processInfo.systemUptime - goalStarted,
+                inputTokens: agent.totalInputTokens, completionAudit: agent.completionAudit))
+            if verbose, let evidence = agent.completionAudit {
+                let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+                if let data = try? encoder.encode(evidence), let text = String(data: data, encoding: .utf8) {
+                    Swift.print("  evidence  \(text)")
+                }
+            }
 
             if profile {
                 for stage in totals.keys.sorted() {
@@ -311,8 +387,22 @@ struct VPhoneJevCommand: ParsableCommand {
             fflush(stdout)
             if !session && !outcome.succeeded { throw ExitCode(1) }
             if !session { break }
+            if !outcome.succeeded { _ = try await observer.observe() }
             pendingGoal = nil
         }
+    }
+
+    static func bundledPlannerPath(executable: URL = Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])) throws -> String {
+        var candidates: [URL] = []
+        var parent = executable.resolvingSymlinksInPath().deletingLastPathComponent()
+        for _ in 0..<5 {
+            candidates.append(parent.appendingPathComponent("scripts/jev_codex_planner.py"))
+            parent.deleteLastPathComponent()
+        }
+        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
+            throw ValidationError("--decompose could not find scripts/jev_codex_planner.py beside this checkout or executable. Use --planner with its explicit path.")
+        }
+        return path.standardizedFileURL.path
     }
 
     // MARK: Output
@@ -380,5 +470,62 @@ struct VPhoneJevCommand: ParsableCommand {
         Swift.print("  confirm   \(prompt) [y/N] ", terminator: "")
         guard let answer = readLine(strippingNewline: true)?.lowercased() else { return false }
         return answer == "y" || answer == "yes"
+    }
+}
+
+// MARK: - Structured warm session
+
+struct JevSessionRequests {
+    struct Request: Decodable {
+        let id: String
+        let goal: String
+    }
+    enum Input {
+        case goal(Request)
+        case rejected(id: String?, reason: String)
+    }
+    private var acceptedIDs: Set<String> = []
+
+    mutating func accept(_ line: String) -> Input {
+        guard line.utf8.count <= 131_072 else { return .rejected(id: nil, reason: "Request exceeds 128 KiB.") }
+        let data = Data(line.utf8)
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .rejected(id: nil, reason: "Expected a JSON object with id and goal.")
+        }
+        let id = object["id"] as? String
+        guard Set(object.keys) == ["id", "goal"], let request = try? JSONDecoder().decode(Request.self, from: data),
+              !request.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, request.id.utf8.count <= 128,
+              !request.goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, request.goal.utf8.count <= 65_536 else {
+            return .rejected(id: id, reason: "Expected a nonempty id (up to 128 bytes) and goal (up to 64 KiB).")
+        }
+        guard acceptedIDs.insert(request.id).inserted else {
+            return .rejected(id: request.id, reason: "Duplicate id; the goal was not executed again.")
+        }
+        return .goal(request)
+    }
+}
+
+struct JevSessionEvent: Encodable {
+    let event: String
+    var id: String? = nil
+    var goal: String? = nil
+    var outcome: String? = nil
+    var reason: String? = nil
+    var steps: Int? = nil
+    var elapsedSeconds: Double? = nil
+    var inputTokens: Int? = nil
+    var completionAudit: VPhoneJevAgent.CompletionAudit? = nil
+}
+
+extension JevSessionEvent {
+    init(id: String?, goal: String, outcome: VPhoneJevAgent.Outcome, elapsedSeconds: Double,
+         inputTokens: Int, completionAudit: VPhoneJevAgent.CompletionAudit?) {
+        self.init(event: "result", id: id, goal: goal, elapsedSeconds: elapsedSeconds,
+            inputTokens: inputTokens, completionAudit: completionAudit)
+        switch outcome {
+        case let .achieved(steps): self.outcome = "achieved"; self.steps = steps
+        case let .stopped(reason, steps): self.outcome = "stopped"; self.reason = reason; self.steps = steps
+        case let .exhausted(steps): self.outcome = "exhausted"; self.steps = steps
+        }
     }
 }

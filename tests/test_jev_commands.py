@@ -6,6 +6,7 @@ The fake phone is used only to check process exit status, not phone capability.
 
 import json
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -82,6 +83,129 @@ class JevCommandTests(unittest.TestCase):
             finally:
                 phone.terminate()
                 phone.wait(timeout=5)
+
+
+class JevSessionTests(unittest.TestCase):
+    def test_decompose_does_not_execute_a_helper_from_the_working_directory(self):
+        with tempfile.TemporaryDirectory(prefix="jev-helper-", dir="/tmp") as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            shadow = scripts / "jev_codex_planner.py"
+            shadow.write_text('#!/bin/sh\nprintf shadow > "$PLANNER_MARKER"\nexit 1\n')
+            shadow.chmod(0o755)
+            codex = root / "fixture-codex"
+            codex.write_text('#!/bin/sh\nprintf bundled > "$PLANNER_MARKER"\nexit 1\n')
+            codex.chmod(0o755)
+            marker = root / "used-helper"
+            phone_path = root / "phone.sock"
+            phone = subprocess.Popen(
+                [sys.executable, str(ROOT / "tests/jev_fake_phone.py"), str(phone_path)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                while not phone_path.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(phone_path.exists())
+                env = dict(os.environ, TYPESAFE_API_KEY="fixture-not-a-real-key",
+                           JEV_CODEX_BINARY=str(codex), PLANNER_MARKER=str(marker))
+                result = subprocess.run(
+                    [str(BINARY), "jev", "open Settings", "--decompose", "--dry-run",
+                     "--socket", str(phone_path), "--max-steps", "1"],
+                    cwd=root, env=env, capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(marker.read_text(), "bundled")
+                self.assertIn("Planner failed", result.stdout)
+            finally:
+                phone.terminate()
+                phone.wait(timeout=5)
+
+    def test_json_session_reuses_setup_and_isolates_failed_and_duplicate_goals(self):
+        with tempfile.TemporaryDirectory(prefix="jev-session-", dir="/tmp") as directory:
+            path = str(Path(directory) / "phone.sock")
+            requests = []
+            stopped = threading.Event()
+            foreground = "Home"
+            with socket.socket(socket.AF_UNIX) as server:
+                server.bind(path)
+                server.listen()
+                server.settimeout(0.1)
+
+                def serve():
+                    nonlocal foreground
+                    while not stopped.is_set():
+                        try:
+                            connection, _ = server.accept()
+                        except TimeoutError:
+                            continue
+                        with connection, connection.makefile("rb") as reader:
+                            request = json.loads(reader.readline())
+                            requests.append(request)
+                            response = {"ok": True}
+                            if request["t"] == "apps":
+                                response["apps"] = [
+                                    {"bundle_id": "example.settings", "name": "Settings"},
+                                    {"bundle_id": "example.safari", "name": "Safari"},
+                                ]
+                            elif request["t"] == "observe":
+                                response.update(source="accessibility", foreground=foreground,
+                                    screen={"width": 400, "height": 800}, elements=[
+                                        {"id": "settings", "role": "icon", "label": "Settings", "x": 50, "y": 100},
+                                        {"id": "safari", "role": "icon", "label": "Safari", "x": 150, "y": 100},
+                                    ])
+                            elif request["t"] == "launch":
+                                foreground = "Settings" if request["bundle"] == "example.settings" else "Safari"
+                                if foreground == "Settings":
+                                    response = {"ok": False, "error": "fixture acknowledgment lost"}
+                            connection.sendall(json.dumps(response).encode() + b"\n")
+
+                worker = threading.Thread(target=serve, daemon=True)
+                worker.start()
+                lines = [
+                    {"id": "first", "goal": "open Settings"},
+                    {"id": "first", "goal": "open Settings"},
+                    "malformed request",
+                    {"id": "second", "goal": "open Safari"},
+                ]
+                try:
+                    result = subprocess.run(
+                        [str(BINARY), "jev", "--session", "--session-json", "--baseline", "--verbose",
+                         "--profile", "--max-steps", "1", "--socket", path],
+                        input="\n".join(json.dumps(line) if isinstance(line, dict) else line for line in lines) + "\n",
+                        capture_output=True, text=True, timeout=20,
+                    )
+                finally:
+                    stopped.set()
+                    worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            events = [json.loads(line) for line in result.stdout.splitlines()]
+            self.assertEqual([event["event"] for event in events], ["ready", "result", "rejected", "rejected", "result"])
+            results = [event for event in events if event["event"] == "result"]
+            self.assertEqual([event["id"] for event in results], ["first", "second"])
+            self.assertEqual([event["goal"] for event in results], ["open Settings", "open Safari"])
+            self.assertEqual([event["outcome"] for event in results], ["stopped", "exhausted"])
+            self.assertTrue(all("completionAudit" not in event for event in results))
+            self.assertEqual(sum(request["t"] == "apps" for request in requests), 1)
+            self.assertEqual([request["bundle"] for request in requests if request["t"] == "launch"],
+                             ["example.settings", "example.safari"])
+            self.assertIn("  app       Settings", result.stderr)
+            self.assertEqual(len(re.findall(r'"history"\s*:\s*\[\s*\]', result.stderr)), 2)
+
+    def test_session_and_planner_flag_constraints(self):
+        cases = [
+            (["--session-json", "inspect"], "--session-json requires --session"),
+            (["--session", "--session-json", "inspect"], "goals supplied as JSON lines"),
+            (["inspect", "--decompose", "--planner", "/unused"], "Choose either --decompose or --planner"),
+            (["inspect", "--decompose", "--baseline"], "cannot be combined with --baseline"),
+        ]
+        for arguments, message in cases:
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([str(BINARY), "jev", *arguments], capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
 
 
 class JevDemoTests(unittest.TestCase):

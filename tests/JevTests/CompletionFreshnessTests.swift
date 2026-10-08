@@ -12,7 +12,8 @@ struct CompletionFreshnessTests {
         func observe() async throws -> JevObservation {
             reads += 1
             let title = titles.count > 1 ? titles.removeFirst() : titles[0]
-            var observation = JevObservation(foregroundApp: "Browser", elements: [],
+            var observation = JevObservation(foregroundApp: "Browser", elements: [
+                JevElement(id: "title", role: "statictext", label: title, value: nil, point: .zero)],
                 bounds: CGRect(x: 0, y: 0, width: 400, height: 800),
                 source: .accessibility, documentTitle: title)
             if incompleteReads.contains(reads) { observation.completenessIssue = "Remote content unavailable" }
@@ -51,7 +52,7 @@ struct CompletionFreshnessTests {
         #expect(decider.calls == 1)
     }
 
-    @Test func changedCompletionEvidenceIsRejudgedBeforeSuccess() async throws {
+    @Test func changedCompletionAuditIsRejudgedBeforeSuccess() async throws {
         let decider = Finisher()
         let screens = Screens(["Old", "New", "New"])
         let agent = VPhoneJevAgent(goal: "Read the page", decider: decider,
@@ -78,7 +79,8 @@ struct CompletionFreshnessTests {
             var reads = 0
             func observe() async throws -> JevObservation {
                 reads += 1
-                return JevObservation(foregroundApp: "Forms", elements: [],
+                return JevObservation(foregroundApp: "Forms", elements: [
+                    JevElement(id: "form", role: "statictext", label: "Form", value: nil, point: .zero)],
                     bounds: CGRect(x: 0, y: 0, width: 400, height: 800), source: .accessibility,
                     nearbyElements: [.init(id: "context1", role: "textfield", label: "Duration",
                         value: reads == 1 ? "45" : "60", visibility: "covered; not actionable")])
@@ -212,6 +214,44 @@ struct CompletionFreshnessTests {
         #expect(try await !run(probability: 0.5, done: 0.9, corroborate: false))
         #expect(try await !run(probability: 0, done: 0.9, corroborate: false))
         #expect(try await !run(probability: 0.7, done: 0.2, corroborate: true))
+    }
+
+    @Test func changedVerifiedFactsCannotBeCertifiedByAnOldDecision() async throws {
+        final class Facts: JevFactProvider {
+            var reads = 0
+            func snapshot() async -> [String: String] { [:] }
+            func changes(since baseline: [String: String]) async -> [String] {
+                reads += 1
+                return [reads == 1 ? "Setting is enabled" : "Setting is disabled"]
+            }
+        }
+        let facts = Facts(), decider = Finisher()
+        let agent = VPhoneJevAgent(goal: "Check setting", decider: decider,
+            provider: Screens(["Stable"]), actuator: NoInput())
+        agent.facts = facts
+        #expect(try await agent.run().succeeded)
+        #expect(decider.calls == 2)
+        #expect(facts.reads == 4)
+        #expect(agent.completionAudit?.verifiedFacts == ["Setting is disabled"])
+    }
+
+    @Test func verifiedFactOrderingDoesNotInvalidateEqualEvidence() async throws {
+        final class Facts: JevFactProvider {
+            var reads = 0
+            func snapshot() async -> [String: String] { [:] }
+            func changes(since baseline: [String: String]) async -> [String] {
+                reads += 1
+                return reads == 1 ? ["A is enabled", "B is disabled"] : ["B is disabled", "A is enabled"]
+            }
+        }
+        let facts = Facts(), decider = Finisher()
+        let agent = VPhoneJevAgent(goal: "Check settings", decider: decider,
+            provider: Screens(["Stable"]), actuator: NoInput())
+        agent.facts = facts
+        #expect(try await agent.run().succeeded)
+        #expect(decider.calls == 1)
+        #expect(facts.reads == 2)
+        #expect(agent.completionAudit?.verifiedFacts == ["B is disabled", "A is enabled"])
     }
 
     @Test func givingUpCannotBeMisreportedAsSuccessByIndependentDoneHead() async throws {

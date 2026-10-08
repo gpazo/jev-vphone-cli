@@ -130,6 +130,19 @@ An optional external planner proposes an action contract. Jev independently judg
 
 ### Use the optional planner
 
+Use `--decompose` to select the bundled planner for a compound goal:
+
+```sh
+.build/debug/vphone-cli jev --simulator booted --decompose \
+  'Find pants, choose an available size, add exactly one pair, and show the bag. Do not checkout or purchase.'
+```
+
+This retains the original goal and proposes local subgoals from currently offered
+actions. It requires the existing Codex CLI authentication. `--planner PATH`
+selects an explicit helper instead; it cannot be combined with `--decompose`.
+Bundled helper discovery is relative to the executable, so an arbitrary working
+directory cannot supply a replacement helper.
+
 The planner is off by default. The default budget is one native action per proposal. To test bounded inspection routes, set `--planner-max-actions` from 2 through 6:
 
 ```sh
@@ -558,6 +571,23 @@ private VM entitlements are not needed for simulator control.
 `make jev_dry SIM=<udid> PROMPT="..."` previews one decision. Add
 `JEV_ARGS="--verbose"` to print the exact text state and probabilities for each
 step. `--max-steps` must be positive, and budget exhaustion exits unsuccessfully.
+
+For callers that send multiple goals, `--session --session-json` accepts one JSON
+object per line, such as `{"id":"task-1","goal":"Open Settings."}`. Wait for the
+`ready` event before sending requests. Diagnostics go to stderr; stdout contains
+JSON events. Every accepted request returns one terminal `result` with its ID,
+outcome, elapsed time, and `completionAudit` on success. Duplicate IDs are rejected
+for the lifetime of the process. Device and model resources stay warm; plans,
+progress, and completion records reset for each goal. See the
+[shopping workflow evaluation](../research/jev_shopping_workflows.md).
+
+Simulator observations require a 150 ms interval of unchanged native semantics
+and layout before judgment or input. Each observation attempt has a 2.5-second
+budget. The main loop allows two passive retries for an unsettled screen without
+repeating input or consuming a decision step. Completion is checked
+against a fresh visible observation and current verified facts. Its audit records
+that evidence and the model's judgment, rather than treating an input
+acknowledgment as proof of success.
 
 The default demo checks that the device reports Bold Text as `1`, independently
 of the agent's result. It prints the device reading even if the agent fails,

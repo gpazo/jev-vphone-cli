@@ -120,6 +120,8 @@ final class VPhoneJevAgent {
         var settleTimeoutMilliseconds = 2500
         /// Gap between those re-observations.
         var settlePollMilliseconds = 250
+        var settleQuietMilliseconds = 0
+        var maxSettleRetries = 2
 
         static let `default` = Policy()
     }
@@ -143,6 +145,32 @@ final class VPhoneJevAgent {
             return false
         }
     }
+
+    struct CompletionAudit: Encodable {
+        struct Judgment: Encodable {
+            let action: String
+            let actionProbability: Double
+            let done: Double
+            let blocked: Double
+            let risky: Double
+            let originalGoalStatus: String?
+            let originalGoalStatusProbability: Double
+            let corroborateCompletion: Bool
+            let doneThreshold: Double
+            let finishAcceptedThreshold: Double
+            let finishActionThreshold: Double
+        }
+        let originalGoal: String
+        let foregroundApp: String
+        let documentTitle: String?
+        let observationSource: String
+        let visibleElements: [JevElement.Described]
+        let verifiedFacts: [String]
+        let verifiedAt: Date
+        let judgment: Judgment
+    }
+
+    private(set) var completionAudit: CompletionAudit?
 
     /// One step, as reported to the caller for logging.
     struct Step {
@@ -216,6 +244,7 @@ final class VPhoneJevAgent {
     // MARK: Loop
 
     func run() async throws -> Outcome {
+        completionAudit = nil
         let textCandidates = JevTextCandidates.extract(from: goal)
 
         // Baseline before anything is touched, so later readings describe
@@ -240,23 +269,33 @@ final class VPhoneJevAgent {
 
         for index in 1 ... policy.maxSteps {
             var observation: JevObservation
-            do {
-                if let fresh = pendingObservation {
-                    // A failed completion check already obtained the next
-                    // complete observation. No input has happened since it;
-                    // judge it now instead of immediately fetching it again.
-                    observation = fresh
-                    pendingObservation = nil
-                } else {
-                    observation = try await observeSettled(after: lastSignature, previousDocument: lastDocument, linkFromDocument: pendingLinkDocument,
-                                                           requireStableLayout: needsStableLayout)
+            var settleRetries = 0
+            while true {
+                do {
+                    if let fresh = pendingObservation {
+                        // A failed completion check already obtained the next
+                        // complete observation. No input has happened since it;
+                        // judge it now instead of immediately fetching it again.
+                        observation = fresh
+                        pendingObservation = nil
+                    } else {
+                        observation = try await observeSettled(after: lastSignature, previousDocument: lastDocument, linkFromDocument: pendingLinkDocument,
+                                                               requireStableLayout: needsStableLayout)
+                    }
+                    break
+                } catch let error as UnsettledObservation {
+                    mark(index, "observe and settle")
+                    guard settleRetries < policy.maxSettleRetries else {
+                        return .stopped(reason: "could not observe the phone: \(error)", steps: index - 1)
+                    }
+                    settleRetries += 1
+                } catch {
+                    return .stopped(reason: "could not observe the phone: \(error)", steps: index - 1)
                 }
-                pendingLinkDocument = nil
-                needsStableLayout = false
-                mark(index, "observe and settle")
-            } catch {
-                return .stopped(reason: "could not observe the phone: \(error)", steps: index - 1)
             }
+            pendingLinkDocument = nil
+            needsStableLayout = false
+            mark(index, "observe and settle")
             lastSignature = observation.signature
             lastDocument = observation.documentTitle.map { (observation.foregroundApp, $0) }
             progress.observe(observation)
@@ -339,6 +378,8 @@ final class VPhoneJevAgent {
 
             // ── Stopping conditions, checked before anything is executed ──
 
+            var completionObservation: JevObservation?
+
             // Completion can go stale during the model request just like a
             // tap. Rejudge changed evidence; never certify the old screen.
             if (policy.corroborateCompletion && doneP >= policy.done && readinessAccepted) || action == .finish || action == .stopUnable {
@@ -346,18 +387,28 @@ final class VPhoneJevAgent {
                     if let issue = observation.completenessIssue {
                         return .stopped(reason: "cannot verify completion: \(issue)", steps: index)
                     }
-                    let fresh = try await provider.observe()
+                    guard !observation.elements.isEmpty else {
+                        return .stopped(reason: "cannot verify completion: no visible elements", steps: index)
+                    }
+                    let fresh = try await observeSettled(after: nil)
                     mark(index, "completion verification")
                     if let issue = fresh.completenessIssue {
                         return .stopped(reason: "cannot verify completion: \(issue)", steps: index)
                     }
-                    if fresh.foregroundApp != observation.foregroundApp || fresh.signature != observation.signature {
+                    guard !fresh.elements.isEmpty else {
+                        return .stopped(reason: "cannot verify completion: no visible elements", steps: index)
+                    }
+                    let freshFacts = await facts?.changes(since: baseline) ?? []
+                    if fresh.foregroundApp != observation.foregroundApp || fresh.source != observation.source
+                        || fresh.signature != observation.signature || freshFacts.sorted() != verifiedFacts.sorted() {
                         progress.observe(fresh)
                         pendingObservation = fresh
                         report(index, decision, "completion deferred: observation changed", false)
                         lastSignature = nil
                         continue
                     }
+                    verifiedFacts = freshFacts
+                    completionObservation = fresh
                 } catch {
                     return .stopped(reason: "could not verify completion observation: \(error)", steps: index)
                 }
@@ -370,6 +421,7 @@ final class VPhoneJevAgent {
 
             if policy.corroborateCompletion && doneP >= policy.done && readinessAccepted {
                 report(index, decision, "goal already satisfied", false)
+                recordCompletion(completionObservation!, decision: decision)
                 return .achieved(steps: index)
             }
 
@@ -386,9 +438,11 @@ final class VPhoneJevAgent {
                 let accepted = policy.corroborateCompletion
                     ? doneP >= policy.finishAccepted
                     : decision.actionProbability > policy.finishActionProbability
-                return accepted
-                    ? .achieved(steps: index)
-                    : .stopped(reason: "completion judgment did not meet the configured threshold", steps: index)
+                if accepted {
+                    recordCompletion(completionObservation!, decision: decision)
+                    return .achieved(steps: index)
+                }
+                return .stopped(reason: "completion judgment did not meet the configured threshold", steps: index)
             }
 
             // Scrolling forever is its own failure: it changes the screen
@@ -500,10 +554,22 @@ final class VPhoneJevAgent {
             // ── Act ──
             mark(index, "gates")
 
+            var executionObservation: JevObservation?
+            if policy.settleQuietMilliseconds > 0, action != .wait {
+                do { executionObservation = try await observeSettled(after: nil) }
+                catch { return .stopped(reason: "could not verify input observation: \(error)", steps: index) }
+                if let fresh = executionObservation,
+                   fresh.foregroundApp != observation.foregroundApp || fresh.source != observation.source
+                    || fresh.signature != observation.signature {
+                    pendingObservation = executionObservation
+                    report(index, decision, "input deferred: observation changed", false)
+                    continue
+                }
+            }
             var executable = plan
             if let element = plan.target, action == .tap || decision.observationGuard != nil {
                 switch await revalidate(element, expected: observation, wholeForm: decision.tapReadiness == "ready",
-                    observationGuard: decision.observationGuard) {
+                    observationGuard: decision.observationGuard, settledObservation: executionObservation) {
                 case let .fresh(current): executable = plan.replacingTarget(current)
                 case let .stale(reason):
                     inputRejection = reason
@@ -512,7 +578,8 @@ final class VPhoneJevAgent {
                     continue
                 }
             } else if let guardEvidence = decision.observationGuard {
-                guard let fresh = try? await provider.observe(), guardEvidence.rejection(in: fresh) == nil else {
+                let fresh = if let executionObservation { executionObservation } else { try? await provider.observe() }
+                guard let fresh, guardEvidence.rejection(in: fresh) == nil else {
                     report(index, decision, "planner execution evidence changed", false)
                     lastSignature = nil
                     continue
@@ -710,8 +777,11 @@ final class VPhoneJevAgent {
     /// decision and the touch correctly reads as stale rather than being
     /// toggled back.
     private func revalidate(_ element: JevElement, expected: JevObservation, wholeForm: Bool = false,
-                            observationGuard: JevPlannerObservationGuard? = nil) async -> Freshness {
-        guard let observation = try? await (wholeForm || observationGuard != nil ? provider.observe() : provider.observeForValidation(of: element)) else {
+                            observationGuard: JevPlannerObservationGuard? = nil,
+                            settledObservation: JevObservation? = nil) async -> Freshness {
+        let current = if let settledObservation { settledObservation }
+            else { try? await (wholeForm || observationGuard != nil ? provider.observe() : provider.observeForValidation(of: element)) }
+        guard let observation = current else {
             return .stale("Cannot verify the selected target")
         }
 
@@ -735,70 +805,71 @@ final class VPhoneJevAgent {
 
     // MARK: Observation
 
-    /// Observe, giving the screen a chance to actually change first.
-    ///
-    /// Asking about a screen identical to the one just acted on buys the same
-    /// judgment twice. Polling until it changes is also faster than a fixed
-    /// sleep, since most transitions finish well inside the timeout.
-    ///
-    /// An unchanged screen is a legitimate outcome — a control that does not
-    /// re-render, a tap that missed — so this gives up and proceeds rather
-    /// than looping, and lets stuck detection make the call.
+    private struct UnsettledObservation: Error, CustomStringConvertible {
+        let milliseconds: Int
+        var description: String { "screen did not settle within \(milliseconds) ms" }
+    }
+
     private func observeSettled(after previous: String?, previousDocument: (app: String, title: String)? = nil, linkFromDocument: String? = nil,
                                requireStableLayout: Bool = false) async throws -> JevObservation {
+        let started = ProcessInfo.processInfo.systemUptime
+        let deadline = started + Double(policy.settleTimeoutMilliseconds) / 1000
+        let quietSeconds = Double(policy.settleQuietMilliseconds) / 1000
         var observation = try await provider.observe()
-        guard let previous else { return observation }
+        if previous == nil, quietSeconds == 0, !requireStableLayout { return observation }
+        var unchangedSince = ProcessInfo.processInfo.systemUptime
+        var stableSamples = 1
 
-        let deadline = Date().addingTimeInterval(Double(policy.settleTimeoutMilliseconds) / 1000)
-        while Date() < deadline {
-            // A document can temporarily disappear during navigation, including
-            // native Back/Forward controls. Keep that transition attached to
-            // its initiating action instead of asking Jev about empty chrome.
-            // Editable native UI (such as an address field) is already usable.
-            if let previousDocument, observation.foregroundApp == previousDocument.app,
-               observation.documentTitle == nil,
-               !observation.elements.contains(where: \.isTextInput) {
-                try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
-                observation = try await provider.observe()
-                continue
-            }
-            // A changed toolbar is not evidence that a link's destination has
-            // loaded. Keep reading under the existing bounded settle budget.
-            // Same-document links may consume that budget; no destination is
-            // invented when their title remains unchanged.
-            if let source = linkFromDocument, observation.documentTitle == nil || observation.documentTitle == source {
-                try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
-                observation = try await provider.observe()
-                continue
-            }
-            if requireStableLayout {
-                let layout = observation.layoutSignature ?? observation.signature
-                try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
-                let again = try await provider.observe()
-                if layout == (again.layoutSignature ?? again.signature), observation.signature == again.signature {
-                    return again
-                }
-                observation = again
-                continue
-            }
-            if observation.signature != previous {
-                // Native input asserts its target in the guest at execution.
-                // A changed semantic screen can be judged immediately; if it
-                // moves during the request the action is skipped and rejudged.
-                if observation.validatesTargetsAtExecution { return observation }
-                // Changed — but a launching app shows a splash before its real
-                // first screen, and judging that produces "nothing to tap". So
-                // wait for the screen to stop changing, not merely to change.
-                try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
-                let again = try await provider.observe()
-                if again.signature == observation.signature { return again }
-                observation = again
-                continue
-            }
-            try? await Task.sleep(nanoseconds: UInt64(policy.settlePollMilliseconds) * 1_000_000)
-            observation = try await provider.observe()
+        func navigationReady(_ current: JevObservation) -> Bool {
+            if let previousDocument, current.foregroundApp == previousDocument.app,
+               current.documentTitle == nil, !current.elements.contains(where: \.isTextInput) { return false }
+            if let source = linkFromDocument, current.documentTitle == nil || current.documentTitle == source { return false }
+            return true
         }
-        return observation
+        func sameScreen(_ lhs: JevObservation, _ rhs: JevObservation) -> Bool {
+            lhs.foregroundApp == rhs.foregroundApp && lhs.source == rhs.source
+                && lhs.signature == rhs.signature && lhs.layoutSignature == rhs.layoutSignature
+                && lhs.completenessIssue == rhs.completenessIssue
+        }
+
+        while true {
+            let now = ProcessInfo.processInfo.systemUptime
+            let ready = navigationReady(observation)
+            if quietSeconds > 0 {
+                if ready, !observation.elements.isEmpty, stableSamples >= 2,
+                   now - unchangedSince >= quietSeconds, now <= deadline { return observation }
+            } else if ready {
+                if requireStableLayout, stableSamples >= 2 { return observation }
+                if !requireStableLayout, observation.signature != previous,
+                   observation.validatesTargetsAtExecution || stableSamples >= 2 { return observation }
+            }
+            if now >= deadline {
+                if quietSeconds == 0, ready { return observation }
+                throw UnsettledObservation(milliseconds: policy.settleTimeoutMilliseconds)
+            }
+            let remaining = max(0, deadline - now)
+            let delay = min(Double(max(0, policy.settlePollMilliseconds)) / 1000, remaining)
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            let again = try await provider.observe()
+            if ready, navigationReady(again), sameScreen(observation, again) {
+                stableSamples += 1
+            } else {
+                unchangedSince = ProcessInfo.processInfo.systemUptime
+                stableSamples = 1
+            }
+            observation = again
+        }
+    }
+
+    private func recordCompletion(_ observation: JevObservation, decision: JevStepDecision) {
+        completionAudit = CompletionAudit(originalGoal: goal, foregroundApp: observation.foregroundApp,
+            documentTitle: observation.documentTitle, observationSource: observation.source.rawValue,
+            visibleElements: observation.elements.map(\.described), verifiedFacts: verifiedFacts, verifiedAt: Date(),
+            judgment: .init(action: decision.action.rawValue, actionProbability: decision.actionProbability,
+                done: decision.done, blocked: decision.blocked, risky: decision.risky,
+                originalGoalStatus: decision.originalGoalStatus, originalGoalStatusProbability: decision.originalGoalStatusProbability,
+                corroborateCompletion: policy.corroborateCompletion, doneThreshold: policy.done,
+                finishAcceptedThreshold: policy.finishAccepted, finishActionThreshold: policy.finishActionProbability))
     }
 
     /// What the machine itself can do, and what this observation can and
